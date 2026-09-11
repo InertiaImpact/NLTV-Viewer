@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>NltvViewer.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishSingleFile>false</PublishSingleFile>
+    <BuildInParallel>false</BuildInParallel>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NltvViewer.Core\NltvViewer.Core.csproj" />
+    <ProjectReference Include="..\NltvViewer.Infrastructure\NltvViewer.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

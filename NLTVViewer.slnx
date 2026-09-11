@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/NltvViewer.Core/NltvViewer.Core.csproj" />
+  <Project Path="src/NltvViewer.Infrastructure/NltvViewer.Infrastructure.csproj" />
+  <Project Path="src/NltvViewer.App/NltvViewer.App.csproj" />
+  <Project Path="tests/NltvViewer.Tests/NltvViewer.Tests.csproj" />
+</Solution>
+

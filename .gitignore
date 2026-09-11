@@ -1,0 +1,21 @@
+bin/
+obj/
+.vs/
+.idea/
+TestResults/
+artifacts/
+publish/
+
+# Machine-local settings and runtime state
+appsettings.Local.json
+*.local.json
+data/
+logs/
+*.db
+*.db-shm
+*.db-wal
+
+# Private source reports. Tests generate anonymized fixtures instead.
+samples/private/
+~$*.xlsx
+

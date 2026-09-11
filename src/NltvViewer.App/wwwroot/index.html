@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#17365d">
+  <title>News Ratings</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#ratings">Skip to ratings</a>
+
+  <header class="site-header">
+    <div class="site-header__inner">
+      <div>
+        <p class="eyebrow">P18+ impressions</p>
+        <h1 id="page-title">News Ratings</h1>
+        <p class="subtitle">Quarter-hour performance at a glance</p>
+      </div>
+      <div class="service-status" aria-live="polite">
+        <span id="status-dot" class="status-dot status-dot--checking" aria-hidden="true"></span>
+        <div>
+          <span id="status-label">Checking reports…</span>
+          <span id="last-refresh" class="last-refresh"></span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main id="ratings" class="page-shell" tabindex="-1">
+    <section class="date-panel" aria-labelledby="date-heading">
+      <div>
+        <h2 id="date-heading">Report date</h2>
+        <p id="date-summary" class="date-summary">Loading available dates…</p>
+      </div>
+      <div class="date-controls">
+        <button id="previous-day" class="icon-button" type="button" aria-label="Previous available report day" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+          <span>Previous</span>
+        </button>
+        <label class="date-field">
+          <span class="sr-only">Choose report date</span>
+          <input id="report-date" type="date" disabled>
+        </label>
+        <button id="next-day" class="icon-button icon-button--next" type="button" aria-label="Next available report day" disabled>
+          <span>Next</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+        </button>
+      </div>
+    </section>
+
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <section id="loading-state" class="loading-state" aria-label="Loading ratings" aria-live="polite">
+      <span class="spinner" aria-hidden="true"></span>
+      <p>Loading ratings…</p>
+    </section>
+
+    <section id="message-state" class="message-state" hidden>
+      <div class="message-state__icon" aria-hidden="true">!</div>
+      <h2 id="message-title">Ratings unavailable</h2>
+      <p id="message-body"></p>
+      <button id="try-again" class="primary-button" type="button">Try again</button>
+    </section>
+
+    <section id="show-list" class="show-list" aria-label="Show ratings" hidden></section>
+
+    <noscript>
+      <section class="message-state">
+        <h2>JavaScript is required</h2>
+        <p>This ratings view needs JavaScript to load report data. Enable it and reload the page.</p>
+      </section>
+    </noscript>
+  </main>
+
+  <footer class="site-footer">
+    <span>View only</span>
+    <span aria-hidden="true">•</span>
+    <span>Data refresh and settings are managed in the desktop app</span>
+  </footer>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
