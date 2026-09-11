@@ -139,6 +139,41 @@ public sealed class ReportComparisonServiceTests
         Assert.Contains("preempted or missing", show.StateMessage, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void BuildComparesAnExplicitDynamicSelection()
+    {
+        var capabilities = new RatingCapabilities(
+            [new("hh", "HH"), new("p18-plus", "P18+")],
+            [
+                new("rtg", "RTG % (X.X)", "percent", "number", 1),
+                new("imp", "IMP", "impressions", "number", 0)
+            ],
+            [new("hh", "rtg"), new("p18-plus", "imp")],
+            "p18-plus",
+            "imp");
+        var selectedDate = new DateOnly(2026, 9, 4);
+        var currentSegment = Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 100m)
+            with { Values = [2m, 100m] };
+        var priorSegment = Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 50m)
+            with { Values = [1m, 50m] };
+        var selected = Report(selectedDate, currentSegment) with { Capabilities = capabilities };
+        var prior = Report(selectedDate.AddDays(-7), priorSegment) with { Capabilities = capabilities };
+        var group = new ShowGroupSettings { Id = "news", Aliases = ["ALPHA NEWS*"] };
+
+        var result = _service.Build(
+            selected,
+            new Dictionary<DateOnly, RatingReport> { [prior.ReportDate] = prior },
+            [group],
+            new RatingSelection("hh", "rtg"));
+
+        var segment = Assert.Single(Assert.Single(result.Shows).Segments);
+        Assert.Equal(new RatingSelection("hh", "rtg"), result.Selection);
+        Assert.Equal(2m, segment.Value);
+        Assert.Equal(1m, segment.Comparisons[0].Value);
+        Assert.Null(segment.Comparisons[0].Impressions);
+        Assert.Equal(new MetricDelta(1m, 100m), segment.Comparisons[0].Delta);
+    }
+
     [Theory]
     [InlineData("  Alpha   News-At 6  ", "alpha news*")]
     [InlineData("ALPHA NEWS-AT 6", "ALPHA NEWS-AT ?")]

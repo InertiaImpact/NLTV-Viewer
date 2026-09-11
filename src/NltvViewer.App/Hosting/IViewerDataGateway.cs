@@ -18,6 +18,7 @@ public sealed record ViewerDataStatus(
     string? ErrorCode,
     string Message,
     bool HasUsableReports,
+    RatingCapabilities Capabilities,
     IReadOnlyList<string> Warnings);
 
 public interface IViewerDataGateway : IDisposable
@@ -28,7 +29,29 @@ public interface IViewerDataGateway : IDisposable
 
     Task<object> GetDaysAsync(CancellationToken cancellationToken);
 
-    Task<object?> GetRatingsAsync(DateOnly reportDate, CancellationToken cancellationToken);
+    Task<object?> GetRatingsAsync(
+        DateOnly reportDate,
+        string? demographicId,
+        string? metricId,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class RatingSelectionException : Exception
+{
+    public RatingSelectionException(
+        string message,
+        RatingCapabilities capabilities,
+        bool isInvalidRequest,
+        Exception innerException)
+        : base(message, innerException)
+    {
+        Capabilities = capabilities;
+        IsInvalidRequest = isInvalidRequest;
+    }
+
+    public RatingCapabilities Capabilities { get; }
+
+    public bool IsInvalidRequest { get; }
 }
 
 public static class ViewerDataGatewayFactory
@@ -58,6 +81,7 @@ public sealed class ViewerDataGateway : IViewerDataGateway
         "not_refreshed",
         "Reports have not been refreshed.",
         false,
+        RatingCapabilities.Empty,
         []);
 
     public ViewerDataGateway(
@@ -110,6 +134,8 @@ public sealed class ViewerDataGateway : IViewerDataGateway
         var errorCode = DetermineErrorCode(result);
         var message = BuildRefreshMessage(result, snapshot.SourceDisplayName);
         var warnings = result.Warnings?.ToArray() ?? [];
+        var capabilities = await GetLatestCapabilitiesAsync(snapshot, cancellationToken)
+            .ConfigureAwait(false);
         UpdateStatus(new ViewerDataStatus(
             result.CompletedAtUtc,
             result.Status != CatalogStatus.Available || result.StaleReports > 0,
@@ -118,6 +144,7 @@ public sealed class ViewerDataGateway : IViewerDataGateway
             errorCode,
             message,
             snapshot.Catalog.AvailableDates.Count > 0,
+            capabilities,
             warnings));
         LocalLog.Write(
             sourceAvailable && errorCode is null ? "Information" : "Warning",
@@ -141,6 +168,7 @@ public sealed class ViewerDataGateway : IViewerDataGateway
             isStale = status.IsStale,
             errorCode = status.ErrorCode,
             message = status.Message,
+            capabilities = status.Capabilities,
             warnings = status.Warnings,
         };
         return Task.FromResult(response);
@@ -148,6 +176,8 @@ public sealed class ViewerDataGateway : IViewerDataGateway
 
     public async Task<object?> GetRatingsAsync(
         DateOnly reportDate,
+        string? demographicId,
+        string? metricId,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -173,16 +203,89 @@ public sealed class ViewerDataGateway : IViewerDataGateway
             }
         }
 
-        var comparison = _comparisonService.Build(
-            selected.Report!,
-            comparisonReports,
-            snapshot.ShowGroups);
+        ComparisonView comparison;
+        try
+        {
+            var selection = ResolveSelection(
+                selected.Report!,
+                snapshot,
+                demographicId,
+                metricId);
+            comparison = _comparisonService.Build(
+                selected.Report!,
+                comparisonReports,
+                snapshot.ShowGroups,
+                selection);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new RatingSelectionException(
+                exception.Message,
+                selected.Report!.EffectiveCapabilities,
+                isInvalidRequest: true,
+                exception);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new RatingSelectionException(
+                exception.Message,
+                selected.Report!.EffectiveCapabilities,
+                isInvalidRequest: false,
+                exception);
+        }
         var status = Status;
+        var legacySelection = string.Equals(
+                comparison.Selection.DemographicId,
+                "p18-plus",
+                StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                comparison.Selection.MetricId,
+                "imp",
+                StringComparison.OrdinalIgnoreCase);
         return new
         {
             comparison.SelectedDate,
             comparison.SourceLastModifiedUtc,
-            comparison.Shows,
+            shows = comparison.Shows.Select(show => new
+            {
+                show.GroupId,
+                show.DisplayName,
+                show.ViewingSource,
+                show.ProgramName,
+                show.State,
+                show.StateMessage,
+                segments = show.Segments.Select(segment => new
+                {
+                    segment.SegmentNumber,
+                    current = new
+                    {
+                        segment.Current.ViewingSource,
+                        segment.Current.ProgramName,
+                        segment.Current.TimeLabel,
+                        segment.Current.StartMinute,
+                        segment.Current.EndMinute,
+                        segment.Current.BroadcastOrder,
+                        p18PlusImpressions = legacySelection
+                            ? segment.Current.P18PlusImpressions
+                            : null,
+                    },
+                    segment.Value,
+                    comparisons = segment.Comparisons.Select(period => new
+                    {
+                        period.Period,
+                        period.TargetDate,
+                        period.ActualTimeLabel,
+                        period.ActualProgramName,
+                        impressions = legacySelection ? period.Impressions : null,
+                        period.Delta,
+                        period.Value,
+                    }).ToArray(),
+                }).ToArray(),
+            }).ToArray(),
+            comparison.Capabilities,
+            comparison.Selection,
+            demographic = comparison.Selection.DemographicId,
+            metric = comparison.Selection.MetricId,
             isStale = status.IsStale,
             errorCode = status.ErrorCode,
             message = status.Message,
@@ -232,6 +335,8 @@ public sealed class ViewerDataGateway : IViewerDataGateway
                 {
                     ShowGroups = CloneShowGroups(settings),
                     SourceDisplayName = DisplaySource(reportRoot),
+                    PreferredDemographicId = NormalizeOptionalId(settings.DefaultDemographicId),
+                    PreferredMetricId = NormalizeOptionalId(settings.DefaultMetricId),
                 };
                 return _current;
             }
@@ -262,7 +367,9 @@ public sealed class ViewerDataGateway : IViewerDataGateway
             reportRoot,
             DisplaySource(reportRoot),
             catalog,
-            CloneShowGroups(settings));
+            CloneShowGroups(settings),
+            NormalizeOptionalId(settings.DefaultDemographicId),
+            NormalizeOptionalId(settings.DefaultMetricId));
     }
 
     private static List<ShowGroupSettings> CloneShowGroups(
@@ -271,6 +378,9 @@ public sealed class ViewerDataGateway : IViewerDataGateway
 
     private static string DisplaySource(string reportRoot) =>
         string.IsNullOrWhiteSpace(reportRoot) ? "the configured report location" : reportRoot;
+
+    private static string? NormalizeOptionalId(string value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static string GetCachePath(string reportRoot)
     {
@@ -316,6 +426,92 @@ public sealed class ViewerDataGateway : IViewerDataGateway
     public static bool IsReportFormatError(string? errorCode) =>
         errorCode is NoUsableReportsErrorCode or "no_reports_parsed";
 
+    private static RatingSelection? ResolveSelection(
+        RatingReport report,
+        CatalogSnapshot snapshot,
+        string? demographicId,
+        string? metricId)
+    {
+        var requestedDemographic = NormalizeOptionalId(demographicId ?? string.Empty);
+        var requestedMetric = NormalizeOptionalId(metricId ?? string.Empty);
+        if ((requestedDemographic is null) != (requestedMetric is null))
+        {
+            throw new ArgumentException(
+                "demographic and metric must be supplied together.");
+        }
+
+        if (requestedDemographic is not null && requestedMetric is not null)
+        {
+            var explicitSelection = new RatingSelection(requestedDemographic, requestedMetric);
+            _ = report.EffectiveCapabilities.Resolve(explicitSelection);
+            return explicitSelection;
+        }
+
+        if (snapshot.PreferredDemographicId is null || snapshot.PreferredMetricId is null)
+        {
+            return null;
+        }
+
+        var preferred = new RatingSelection(
+            snapshot.PreferredDemographicId,
+            snapshot.PreferredMetricId);
+        try
+        {
+            return report.EffectiveCapabilities.Resolve(preferred);
+        }
+        catch (ArgumentException)
+        {
+            // A local preference is advisory because capabilities can differ by
+            // report date. Explicit API selections above never fall back.
+            return null;
+        }
+    }
+
+    private static async Task<RatingCapabilities> GetLatestCapabilitiesAsync(
+        CatalogSnapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        var availableDates = snapshot.Catalog.AvailableDates;
+        if (availableDates.Count == 0)
+        {
+            return RatingCapabilities.Empty;
+        }
+
+        var latestDate = availableDates.Max();
+
+        var lookup = await snapshot.Catalog
+            .GetAsync(latestDate, cancellationToken)
+            .ConfigureAwait(false);
+        var capabilities = lookup.Report?.EffectiveCapabilities ?? RatingCapabilities.Empty;
+        return ApplyPreferredSelection(capabilities, snapshot);
+    }
+
+    private static RatingCapabilities ApplyPreferredSelection(
+        RatingCapabilities capabilities,
+        CatalogSnapshot snapshot)
+    {
+        if (snapshot.PreferredDemographicId is null || snapshot.PreferredMetricId is null)
+        {
+            return capabilities;
+        }
+
+        try
+        {
+            var preferred = capabilities.Resolve(new RatingSelection(
+                snapshot.PreferredDemographicId,
+                snapshot.PreferredMetricId));
+            return capabilities with
+            {
+                DefaultDemographicId = preferred.DemographicId,
+                DefaultMetricId = preferred.MetricId,
+            };
+        }
+        catch (ArgumentException)
+        {
+            return capabilities;
+        }
+    }
+
     private void UpdateStatus(ViewerDataStatus status)
     {
         lock (_statusSync)
@@ -328,5 +524,7 @@ public sealed class ViewerDataGateway : IViewerDataGateway
         string ReportRoot,
         string SourceDisplayName,
         NetworkReportCatalog Catalog,
-        IReadOnlyList<ShowGroupSettings> ShowGroups);
+        IReadOnlyList<ShowGroupSettings> ShowGroups,
+        string? PreferredDemographicId,
+        string? PreferredMetricId);
 }

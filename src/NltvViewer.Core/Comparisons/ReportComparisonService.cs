@@ -9,7 +9,8 @@ public interface IReportComparisonService
     ComparisonView Build(
         RatingReport selected,
         IReadOnlyDictionary<DateOnly, RatingReport> comparisonReports,
-        IReadOnlyList<ShowGroupSettings> showGroups);
+        IReadOnlyList<ShowGroupSettings> showGroups,
+        RatingSelection? selection = null);
 }
 
 public sealed class ReportComparisonService : IReportComparisonService
@@ -24,11 +25,14 @@ public sealed class ReportComparisonService : IReportComparisonService
     public ComparisonView Build(
         RatingReport selected,
         IReadOnlyDictionary<DateOnly, RatingReport> comparisonReports,
-        IReadOnlyList<ShowGroupSettings> showGroups)
+        IReadOnlyList<ShowGroupSettings> showGroups,
+        RatingSelection? selection = null)
     {
         ArgumentNullException.ThrowIfNull(selected);
         ArgumentNullException.ThrowIfNull(comparisonReports);
         ArgumentNullException.ThrowIfNull(showGroups);
+        var capabilities = selected.EffectiveCapabilities;
+        var resolvedSelection = capabilities.Resolve(selection);
 
         var reportMap = Periods.ToDictionary(
             period => period.Id,
@@ -78,20 +82,34 @@ public sealed class ReportComparisonService : IReportComparisonService
                 for (var index = 0; index < currentRun.Segments.Count; index++)
                 {
                     var current = currentRun.Segments[index];
+                    var currentValue = selected.GetValue(
+                        current,
+                        resolvedSelection.DemographicId,
+                        resolvedSelection.MetricId);
                     var values = Periods.Select(period =>
                     {
                         var targetDate = selected.ReportDate.AddDays(-period.DaysBack);
+                        var referenceReport = reportMap[period.Id];
                         var reference = referenceRuns[period.Id]?.Segments.ElementAtOrDefault(index);
+                        var referenceValue = reference is null || referenceReport is null
+                            ? null
+                            : referenceReport.GetValue(
+                                reference,
+                                resolvedSelection.DemographicId,
+                                resolvedSelection.MetricId);
                         return new PeriodComparison(
                             period,
                             targetDate,
                             reference?.TimeLabel,
                             reference?.ProgramName,
-                            reference?.P18PlusImpressions,
-                            CalculateDelta(current.P18PlusImpressions, reference?.P18PlusImpressions));
+                            string.Equals(resolvedSelection.MetricId, "imp", StringComparison.OrdinalIgnoreCase)
+                                ? referenceValue
+                                : null,
+                            CalculateDelta(currentValue, referenceValue),
+                            referenceValue);
                     }).ToArray();
 
-                    segmentResults.Add(new SegmentComparison(index + 1, current, values));
+                    segmentResults.Add(new SegmentComparison(index + 1, current, values, currentValue));
                 }
 
                 output.Add(new ShowComparison(
@@ -104,7 +122,12 @@ public sealed class ReportComparisonService : IReportComparisonService
             }
         }
 
-        return new ComparisonView(selected.ReportDate, selected.SourceLastModifiedUtc, output);
+        return new ComparisonView(
+            selected.ReportDate,
+            selected.SourceLastModifiedUtc,
+            output,
+            capabilities,
+            resolvedSelection);
     }
 
     public static MetricDelta? CalculateDelta(decimal? current, decimal? reference)
@@ -199,7 +222,9 @@ public sealed record ComparisonPeriod(string Id, string Label, int DaysBack);
 public sealed record ComparisonView(
     DateOnly SelectedDate,
     DateTimeOffset SourceLastModifiedUtc,
-    IReadOnlyList<ShowComparison> Shows);
+    IReadOnlyList<ShowComparison> Shows,
+    RatingCapabilities Capabilities,
+    RatingSelection Selection);
 
 public sealed record ShowComparison(
     string GroupId,
@@ -220,7 +245,8 @@ public enum ShowComparisonState
 public sealed record SegmentComparison(
     int SegmentNumber,
     RatingSegment Current,
-    IReadOnlyList<PeriodComparison> Comparisons);
+    IReadOnlyList<PeriodComparison> Comparisons,
+    decimal? Value);
 
 public sealed record PeriodComparison(
     ComparisonPeriod Period,
@@ -228,6 +254,7 @@ public sealed record PeriodComparison(
     string? ActualTimeLabel,
     string? ActualProgramName,
     decimal? Impressions,
-    MetricDelta? Delta);
+    MetricDelta? Delta,
+    decimal? Value);
 
 public sealed record MetricDelta(decimal Absolute, decimal? Percentage);

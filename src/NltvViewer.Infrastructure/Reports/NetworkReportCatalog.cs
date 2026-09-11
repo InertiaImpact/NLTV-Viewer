@@ -10,7 +10,8 @@ namespace NltvViewer.Infrastructure.Reports;
 public sealed class NetworkReportCatalog : IReportCatalog, IDisposable
 {
     private const int MaximumWarnings = 100;
-    private const int PersistentCacheSchemaVersion = 1;
+    private const int PersistentCacheSchemaVersion = 2;
+    private const int MaximumDetailedReports = 16;
     private static readonly JsonSerializerOptions CacheJsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = false
@@ -20,7 +21,10 @@ public sealed class NetworkReportCatalog : IReportCatalog, IDisposable
     private readonly string? _localCachePath;
     private readonly string _parserCacheVersion;
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    private readonly SemaphoreSlim _detailLoadLock = new(1, 1);
+    private readonly object _detailSync = new();
     private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<DateOnly, DetailCacheEntry> _detailCache = [];
     private IReadOnlyDictionary<DateOnly, RatingReport> _reports = new Dictionary<DateOnly, RatingReport>();
     private IReadOnlyList<DateOnly> _availableDates = Array.Empty<DateOnly>();
     private CatalogRefreshResult _lastRefresh = CatalogRefreshResult.NotRefreshed;
@@ -66,20 +70,63 @@ public sealed class NetworkReportCatalog : IReportCatalog, IDisposable
         }
     }
 
-    public ValueTask<ReportLookupResult> GetAsync(
+    public async ValueTask<ReportLookupResult> GetAsync(
         DateOnly reportDate,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         cancellationToken.ThrowIfCancellationRequested();
         var reports = Volatile.Read(ref _reports);
-        return reports.TryGetValue(reportDate, out var report)
-            ? ValueTask.FromResult(new ReportLookupResult(reportDate, report))
-            : ValueTask.FromResult(new ReportLookupResult(
+        if (!reports.TryGetValue(reportDate, out var report))
+        {
+            return new ReportLookupResult(
                 reportDate,
                 null,
                 "report_date_not_found",
-                $"No supported 15-minute report is available for {reportDate:yyyy-MM-dd}."));
+                $"No supported 15-minute report is available for {reportDate:yyyy-MM-dd}.");
+        }
+
+        if (report.IsDetailComplete)
+        {
+            return new ReportLookupResult(reportDate, report);
+        }
+
+        if (TryGetDetailedReport(report, out var detailed))
+        {
+            return new ReportLookupResult(reportDate, detailed);
+        }
+
+        await _detailLoadLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (TryGetDetailedReport(report, out detailed))
+            {
+                return new ReportLookupResult(reportDate, detailed);
+            }
+
+            var parsed = await _parser.ParseAsync(report.SourcePath, cancellationToken).ConfigureAwait(false);
+            var loaded = parsed.Reports.FirstOrDefault(candidate =>
+                candidate.ReportDate == reportDate &&
+                string.Equals(
+                    candidate.WorksheetName,
+                    report.WorksheetName,
+                    StringComparison.OrdinalIgnoreCase));
+            if (loaded is not null)
+            {
+                StoreDetailedReport(loaded);
+                return new ReportLookupResult(reportDate, loaded);
+            }
+
+            return new ReportLookupResult(
+                reportDate,
+                report,
+                "report_detail_unavailable",
+                $"Detailed ratings for {reportDate:yyyy-MM-dd} could not be loaded; cached P18+ impressions may be stale. {parsed.Message}");
+        }
+        finally
+        {
+            _detailLoadLock.Release();
+        }
     }
 
     public void Dispose()
@@ -90,6 +137,7 @@ public sealed class NetworkReportCatalog : IReportCatalog, IDisposable
         }
 
         _refreshLock.Dispose();
+        _detailLoadLock.Dispose();
         _disposed = true;
     }
 
@@ -197,6 +245,16 @@ public sealed class NetworkReportCatalog : IReportCatalog, IDisposable
             else
             {
                 parsed = await _parser.ParseAsync(path, cancellationToken).ConfigureAwait(false);
+                if (parsed.IsSuccess)
+                {
+                    foreach (var detailedReport in parsed.Reports)
+                    {
+                        StoreDetailedReport(detailedReport);
+                    }
+
+                    parsed = CreateCatalogCacheResult(parsed);
+                }
+
                 if (parsed.Status == ReportParseStatus.Success ||
                     parsed.Status == ReportParseStatus.UnsupportedFormat && cached?.Result.IsSuccess != true)
                 {
@@ -369,6 +427,52 @@ public sealed class NetworkReportCatalog : IReportCatalog, IDisposable
     private readonly record struct FileStamp(long Length, DateTime LastWriteTimeUtc);
 
     private sealed record CacheEntry(FileStamp Stamp, ReportParseResult Result);
+
+    private sealed record DetailCacheEntry(RatingReport Report, long LastAccess);
+
+    private static ReportParseResult CreateCatalogCacheResult(ReportParseResult result) =>
+        ReportParseResult.Success(
+            result.Reports.Select(report => report with
+            {
+                Segments = report.Segments.Select(segment => segment with { Values = null }).ToArray(),
+                IsDetailComplete = false
+            }).ToArray(),
+            result.Warnings);
+
+    private bool TryGetDetailedReport(RatingReport locator, out RatingReport report)
+    {
+        lock (_detailSync)
+        {
+            if (_detailCache.TryGetValue(locator.ReportDate, out var cached) &&
+                string.Equals(cached.Report.SourcePath, locator.SourcePath, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    cached.Report.WorksheetName,
+                    locator.WorksheetName,
+                    StringComparison.OrdinalIgnoreCase) &&
+                cached.Report.SourceLastModifiedUtc == locator.SourceLastModifiedUtc)
+            {
+                report = cached.Report;
+                _detailCache[locator.ReportDate] = cached with { LastAccess = DateTime.UtcNow.Ticks };
+                return true;
+            }
+        }
+
+        report = null!;
+        return false;
+    }
+
+    private void StoreDetailedReport(RatingReport report)
+    {
+        lock (_detailSync)
+        {
+            _detailCache[report.ReportDate] = new DetailCacheEntry(report, DateTime.UtcNow.Ticks);
+            while (_detailCache.Count > MaximumDetailedReports)
+            {
+                var oldest = _detailCache.MinBy(pair => pair.Value.LastAccess).Key;
+                _detailCache.Remove(oldest);
+            }
+        }
+    }
 
     private void LoadPersistentCache()
     {

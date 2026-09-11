@@ -16,9 +16,30 @@
 
   const SVG_NS = "http://www.w3.org/2000/svg";
   const DEFAULT_TITLE = "News Ratings";
-  const state = { availableDays: [], selectedDate: null, data: null, status: null, requestId: 0 };
+  const STORAGE_KEY = `nltv-viewer:selection:${location.pathname.replace(/\/[^/]*$/, "/")}`;
+  const DEFAULT_DEMOGRAPHIC = Object.freeze({ id: "p18-plus", label: "P18+", available: true });
+  const DEFAULT_METRIC = Object.freeze({ id: "imp", label: "IMP", unit: "impressions", format: "number", decimals: 0, available: true });
+  const state = {
+    availableDays: [],
+    selectedDate: null,
+    data: null,
+    status: null,
+    requestId: 0,
+    isLoading: false,
+    selectionRestored: false,
+    capabilityDefaultsApplied: false,
+    demographicId: DEFAULT_DEMOGRAPHIC.id,
+    metricId: DEFAULT_METRIC.id,
+    metricByDemographic: Object.create(null),
+    capabilityNotice: "",
+    capabilities: {
+      demographics: [DEFAULT_DEMOGRAPHIC],
+      metrics: [DEFAULT_METRIC],
+      availableSelections: null,
+      metricsByDemographic: Object.create(null)
+    }
+  };
   const dom = {};
-  const integerFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
   const compactFormatter = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
   const dateFormatter = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
   const shortDateFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
@@ -41,16 +62,25 @@
       statusDot: document.querySelector("#status-dot"),
       statusLabel: document.querySelector("#status-label"),
       lastRefresh: document.querySelector("#last-refresh"),
-      pageTitle: document.querySelector("#page-title")
+      pageTitle: document.querySelector("#page-title"),
+      measureSummary: document.querySelector("#measure-summary"),
+      demographic: document.querySelector("#demographic-select"),
+      metric: document.querySelector("#metric-select"),
+      selectorStatus: document.querySelector("#selector-status")
     });
+
+    restoreSelection();
 
     dom.date.addEventListener("change", () => {
       if (isIsoDate(dom.date.value)) loadRatings(dom.date.value);
     });
     dom.previous.addEventListener("click", () => moveAvailableDay(-1));
     dom.next.addEventListener("click", () => moveAvailableDay(1));
+    dom.demographic.addEventListener("change", () => changeSelection("demographic", dom.demographic.value));
+    dom.metric.addEventListener("change", () => changeSelection("metric", dom.metric.value));
     dom.tryAgain.addEventListener("click", () => state.selectedDate ? loadRatings(state.selectedDate) : bootstrap());
 
+    renderSelectors();
     bootstrap();
   }
 
@@ -73,6 +103,8 @@
       return;
     }
 
+    updateCapabilities(daysResult.value, statusResult.status === "fulfilled" ? statusResult.value : null);
+    renderSelectors();
     const daysInfo = normalizeDays(daysResult.value);
     state.availableDays = daysInfo.days;
     configureDateBounds();
@@ -91,8 +123,9 @@
     await loadRatings(daysInfo.latestAvailableDate);
   }
 
-  async function loadRatings(date) {
+  async function loadRatings(date, preserveCapabilityNotice = false) {
     const requestId = ++state.requestId;
+    if (!preserveCapabilityNotice) state.capabilityNotice = "";
     state.selectedDate = date;
     dom.date.value = date;
     updateNavigation();
@@ -100,13 +133,33 @@
     clearNotice();
 
     try {
-      const url = `${API.ratings}?date=${encodeURIComponent(date)}`;
+      const parameters = new URLSearchParams({ date });
+      if (state.demographicId) parameters.set("demographic", state.demographicId);
+      if (state.metricId) parameters.set("metric", state.metricId);
+      const url = `${API.ratings}?${parameters}`;
       const raw = await fetchJson(url);
       if (requestId !== state.requestId) return;
+      updateCapabilities(raw);
+      applyResponseSelections(raw);
       state.data = normalizeRatings(raw, date);
+      renderSelectors();
       renderRatings();
     } catch (error) {
       if (requestId !== state.requestId) return;
+      if (isSelectionError(error)) {
+        const previousDemographic = state.demographicId;
+        const previousMetric = state.metricId;
+        updateCapabilities(error.body);
+        renderSelectors();
+        const changed = !sameId(previousDemographic, state.demographicId) || !sameId(previousMetric, state.metricId);
+        if (changed && selectedDemographic()?.available && selectedMetric()?.available) {
+          state.capabilityNotice = `The requested audience or measure is unavailable for ${formatDate(date)}. Showing ${selectedDemographic().label} · ${metricContextLabel(selectedMetric())}.`;
+          await loadRatings(date, true);
+          return;
+        }
+        showMessage("Measure unavailable", error.body?.message || "The selected audience and measure are not available for this report date.", false);
+        return;
+      }
       showRequestError(error, `Could not load ratings for ${formatDate(date)}.`);
     }
   }
@@ -146,6 +199,283 @@
       errorCode: safeString(raw?.errorCode || raw?.code),
       displayTitle: safeString(raw?.displayTitle || raw?.siteTitle)
     };
+  }
+
+  function updateCapabilities(...sources) {
+    const demographics = findCapabilityList(sources, ["demographics", "availableDemographics", "audiences"]);
+    const metrics = findCapabilityList(sources, ["metrics", "availableMetrics", "measures"]);
+    const selections = findCapabilityList(sources, ["availableSelections", "selections", "validSelections"]);
+    const metricMap = findCapabilityMap(sources, ["metricsByDemographic", "metricsByAudience", "measuresByDemographic"]);
+    const defaultDemographicId = findCapabilityValue(sources, ["defaultDemographicId", "defaultAudienceId"]);
+    const defaultMetricId = findCapabilityValue(sources, ["defaultMetricId", "defaultMeasureId"]);
+    const previousDemographic = state.demographicId;
+    const previousMetric = state.metricId;
+
+    if (demographics !== null) {
+      state.capabilities.demographics = uniqueOptions(demographics.map(item => normalizeCapability(item, "demographic")).filter(Boolean));
+    }
+    if (metrics !== null) {
+      state.capabilities.metrics = uniqueOptions(metrics.map(item => normalizeCapability(item, "metric")).filter(Boolean));
+    }
+    if (selections !== null) {
+      state.capabilities.availableSelections = selections.map(normalizeSelectionPair).filter(Boolean);
+    }
+    if (metricMap !== null) state.capabilities.metricsByDemographic = normalizeMetricMap(metricMap);
+
+    const useCapabilityDefaults = !state.capabilityDefaultsApplied && !state.selectionRestored;
+    const requestedDemographicId = useCapabilityDefaults
+      ? defaultDemographicId || state.demographicId
+      : state.demographicId;
+    state.demographicId = chooseOptionId(demographicsForSelection(), requestedDemographicId, ["p18", "p18plus"]);
+    const rememberedMetric = state.metricByDemographic[normalizeToken(state.demographicId)]
+      || (useCapabilityDefaults ? defaultMetricId : null)
+      || state.metricId;
+    state.metricId = chooseOptionId(metricsForDemographic(), rememberedMetric, ["imp", "impressions"]);
+    if (state.demographicId && state.metricId) state.metricByDemographic[normalizeToken(state.demographicId)] = state.metricId;
+    if (demographics !== null || metrics !== null || selections !== null) state.capabilityDefaultsApplied = true;
+
+    if (state.selectedDate && ((previousDemographic && !sameId(previousDemographic, state.demographicId)) || (previousMetric && !sameId(previousMetric, state.metricId)))) {
+      const demographicLabel = selectedDemographic()?.label || "available audience";
+      const metricLabel = selectedMetric()?.label || "available measure";
+      state.capabilityNotice = `The previous audience or measure is unavailable for this report date. Showing ${demographicLabel} · ${metricLabel}.`;
+    }
+  }
+
+  function findCapabilityList(sources, keys) {
+    for (const source of sources) {
+      if (!source || typeof source !== "object") continue;
+      const containers = [
+        source.capabilities,
+        source.capabilityMetadata,
+        source.metadata?.capabilities,
+        source.options,
+        source
+      ].filter(Boolean);
+      for (const container of containers) {
+        for (const key of keys) {
+          if (Object.prototype.hasOwnProperty.call(container, key) && Array.isArray(container[key])) {
+            return container[key];
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function findCapabilityMap(sources, keys) {
+    for (const source of sources) {
+      if (!source || typeof source !== "object") continue;
+      const containers = [source.capabilities, source.capabilityMetadata, source.metadata?.capabilities, source.options, source].filter(Boolean);
+      for (const container of containers) {
+        for (const key of keys) {
+          if (container[key] && typeof container[key] === "object" && !Array.isArray(container[key])) return container[key];
+        }
+      }
+    }
+    return null;
+  }
+
+  function findCapabilityValue(sources, keys) {
+    for (const source of sources) {
+      if (!source || typeof source !== "object") continue;
+      const containers = [
+        source.capabilities,
+        source.capabilityMetadata,
+        source.metadata?.capabilities,
+        source.options,
+        source
+      ].filter(Boolean);
+      for (const container of containers) {
+        for (const key of keys) {
+          const value = extractSelectionId(container[key]);
+          if (value) return value;
+        }
+      }
+    }
+    return null;
+  }
+
+  function normalizeCapability(item, kind) {
+    if (typeof item === "string") {
+      const value = safeString(item);
+      return value ? { id: value, label: value, available: true } : null;
+    }
+    if (!item || typeof item !== "object") return null;
+    const id = safeString(item.id || item.key || item.value || item.code || item.name);
+    if (!id) return null;
+    const option = {
+      id,
+      label: safeString(item.label || item.displayName || item.name) || id,
+      available: item.available !== false && item.isAvailable !== false && item.enabled !== false,
+      unavailableReason: safeString(item.unavailableReason || item.reason || item.message)
+    };
+    if (kind === "metric") {
+      option.unit = safeString(item.unit || item.units || item.unitLabel);
+      option.format = safeString(item.format || item.valueFormat || item.displayFormat).toLowerCase();
+      option.decimals = clampDecimals(item.decimals ?? item.decimalPlaces ?? item.precision);
+      option.prefix = safeString(item.prefix);
+      option.suffix = safeString(item.suffix);
+      option.demographicIds = normalizeIdList(item.demographics || item.demographicIds || item.audiences || item.audienceIds);
+    } else {
+      const nestedMetrics = firstArrayProperty(item, ["metrics", "availableMetrics", "measures"]);
+      option.metrics = nestedMetrics === null
+        ? null
+        : uniqueOptions(nestedMetrics.map(metric => normalizeCapability(metric, "metric")).filter(Boolean));
+    }
+    return option;
+  }
+
+  function normalizeMetricMap(map) {
+    const result = Object.create(null);
+    for (const [demographic, metrics] of Object.entries(map)) {
+      if (!Array.isArray(metrics)) continue;
+      result[normalizeToken(demographic)] = uniqueOptions(metrics.map(metric => normalizeCapability(metric, "metric")).filter(Boolean));
+    }
+    return result;
+  }
+
+  function uniqueOptions(options) {
+    const seen = new Set();
+    return options.filter(option => {
+      const key = option.id.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function chooseOptionId(options, currentId, preferredTokens) {
+    const current = findOption(options, currentId);
+    if (current?.available) return current.id;
+    const available = options.filter(option => option.available);
+    const preferred = available.find(option => preferredTokens.includes(normalizeToken(option.id)) || preferredTokens.includes(normalizeToken(option.label)));
+    return preferred?.id || available[0]?.id || options[0]?.id || null;
+  }
+
+  function applyResponseSelections(raw) {
+    const selection = raw?.selection || raw?.selected || {};
+    const demographic = extractSelectionId(raw?.selectedDemographic ?? raw?.demographic ?? selection.demographicId ?? selection.demographic ?? selection.audienceId ?? selection.audience);
+    const metric = extractSelectionId(raw?.selectedMetric ?? raw?.metric ?? selection.metricId ?? selection.metric ?? selection.measureId ?? selection.measure);
+    const demographicOption = findOption(demographicsForSelection(), demographic);
+    if (demographicOption?.available) state.demographicId = demographicOption.id;
+    const metricOption = findOption(metricsForDemographic(), metric);
+    const responseMetricId = metricOption?.available ? metricOption.id : null;
+    state.metricId = chooseOptionId(
+      metricsForDemographic(),
+      responseMetricId || state.metricByDemographic[normalizeToken(state.demographicId)] || state.metricId,
+      ["imp", "impressions"]);
+    if (state.demographicId && state.metricId) state.metricByDemographic[normalizeToken(state.demographicId)] = state.metricId;
+    saveSelection();
+  }
+
+  function extractSelectionId(value) {
+    return typeof value === "string"
+      ? safeString(value)
+      : safeString(value?.id || value?.key || value?.value || value?.code || value?.name);
+  }
+
+  function renderSelectors() {
+    renderSelector(dom.demographic, demographicsForSelection(), state.demographicId, "No audiences available");
+    renderSelector(dom.metric, metricsForDemographic(), state.metricId, "No measures available", true);
+    const demographic = selectedDemographic();
+    const metric = selectedMetric();
+    const demographicLabel = demographic?.label || "Audience unavailable";
+    const metricLabel = metricContextLabel(metric);
+    dom.measureSummary.textContent = `${demographicLabel} · ${metricLabel}`;
+    dom.selectorStatus.textContent = `${demographicLabel}, ${metricLabel}${state.isLoading ? ", loading" : " selected"}.`;
+  }
+
+  function renderSelector(select, options, selectedId, emptyLabel, includeUnit = false) {
+    select.replaceChildren();
+    if (!options.length) {
+      const option = document.createElement("option");
+      option.textContent = emptyLabel;
+      option.value = "";
+      select.append(option);
+      select.disabled = true;
+      return;
+    }
+    for (const descriptor of options) {
+      const option = document.createElement("option");
+      option.value = descriptor.id;
+      option.textContent = `${includeUnit ? metricContextLabel(descriptor) : descriptor.label}${descriptor.available ? "" : " (unavailable)"}`;
+      option.disabled = !descriptor.available;
+      option.title = descriptor.unavailableReason;
+      select.append(option);
+    }
+    select.value = findOption(options, selectedId)?.id || "";
+    const selectableCount = options.filter(option => option.available).length;
+    select.disabled = state.isLoading || selectableCount === 0 || (selectableCount === 1 && options.find(option => option.available)?.id === select.value);
+  }
+
+  function changeSelection(kind, value) {
+    const options = kind === "demographic" ? demographicsForSelection() : metricsForDemographic();
+    const selected = findOption(options, value);
+    if (!selected?.available) {
+      renderSelectors();
+      return;
+    }
+    state.capabilityNotice = "";
+    if (kind === "demographic") {
+      if (state.demographicId && state.metricId) state.metricByDemographic[normalizeToken(state.demographicId)] = state.metricId;
+      state.demographicId = selected.id;
+      state.metricId = chooseOptionId(
+        metricsForDemographic(),
+        state.metricByDemographic[normalizeToken(state.demographicId)] || state.metricId,
+        ["imp", "impressions"]);
+    } else {
+      state.metricId = selected.id;
+      state.metricByDemographic[normalizeToken(state.demographicId)] = selected.id;
+    }
+    saveSelection();
+    renderSelectors();
+    if (state.selectedDate) loadRatings(state.selectedDate);
+  }
+
+  function findOption(options, id) {
+    const key = safeString(id).toLowerCase();
+    return key ? options.find(option => option.id.toLowerCase() === key) || null : null;
+  }
+
+  function selectedDemographic() { return findOption(demographicsForSelection(), state.demographicId); }
+  function selectedMetric() { return findOption(metricsForDemographic(), state.metricId); }
+
+  function demographicsForSelection() {
+    if (state.capabilities.availableSelections === null) return state.capabilities.demographics;
+    return state.capabilities.demographics.map(demographic => {
+      const hasMetric = state.capabilities.availableSelections.some(selection => sameId(selection.demographicId, demographic.id));
+      return hasMetric
+        ? demographic
+        : { ...demographic, available: false, unavailableReason: demographic.unavailableReason || "No measures are available for this audience." };
+    });
+  }
+
+  function metricsForDemographic() {
+    const demographic = selectedDemographic();
+    if (!demographic) return [];
+    if (state.capabilities.availableSelections !== null) {
+      const metricIds = state.capabilities.availableSelections
+        .filter(selection => sameId(selection.demographicId, demographic.id))
+        .map(selection => selection.metricId);
+      return state.capabilities.metrics.filter(metric => metricIds.some(id => sameId(id, metric.id)));
+    }
+    if (demographic.metrics !== null && demographic.metrics !== undefined) return enrichMetrics(demographic.metrics);
+    const mapped = state.capabilities.metricsByDemographic[normalizeToken(demographic.id)];
+    if (mapped) return enrichMetrics(mapped);
+    return state.capabilities.metrics.filter(metric => !metric.demographicIds?.length || metric.demographicIds.some(id => sameId(id, demographic.id)));
+  }
+
+  function enrichMetrics(metrics) {
+    return metrics.map(metric => {
+      const global = findOption(state.capabilities.metrics, metric.id);
+      if (!global) return metric;
+      return {
+        ...global,
+        ...metric,
+        label: metric.label === metric.id ? global.label : metric.label,
+        available: global.available && metric.available
+      };
+    });
   }
 
   function normalizeRatings(raw, requestedDate) {
@@ -201,7 +531,7 @@
       const aliases = series.key === "previousWeek" ? ["previousWeek", "priorWeek", "d7"]
         : series.key === "twoWeeksAgo" ? ["twoWeeksAgo", "twoWeeksPrior", "d14"]
           : series.key === "previousYear" ? ["previousYear", "priorYear", "d364"]
-            : ["selected", "current", "value"];
+            : ["selected", "value", "current"];
       let candidate;
       for (const key of aliases) {
         if (segment?.[key] !== undefined) { candidate = segment[key]; break; }
@@ -214,7 +544,7 @@
         const period = findPeriodComparison(segment?.comparisons, series.key);
         if (period) {
           candidate = {
-            value: period.impressions,
+            value: firstPresent(period, ["value", "metricValue", "impressions"]),
             delta: period.delta?.absolute,
             percentDelta: period.delta?.percentage,
             actualTime: period.actualTimeLabel,
@@ -231,7 +561,7 @@
   function normalizeValue(raw) {
     if (typeof raw === "number") return Number.isFinite(raw) ? { value: raw } : { value: null };
     if (raw && typeof raw === "object") {
-      const number = finiteOrNull(raw.value ?? raw.p18PlusImpressions ?? raw.impressions);
+      const number = finiteOrNull(firstPresent(raw, ["value", "metricValue", "p18PlusImpressions", "impressions"]));
       return {
         value: number,
         delta: finiteOrNull(raw.delta),
@@ -275,6 +605,7 @@
     updateNavigation();
     dom.dateSummary.textContent = formatDate(state.data.selectedDate);
     applyDisplayTitle(state.data.displayTitle || state.status?.displayTitle);
+    renderSelectors();
 
     renderWarnings();
     if (state.data.shows.length === 0) {
@@ -338,7 +669,7 @@
     const wrap = element("div", "chart-wrap");
     const allValues = show.segments.flatMap(segment => SERIES.map(series => segment[series.key]?.value)).filter(Number.isFinite);
     if (!show.segments.length || !allValues.length) {
-      wrap.append(element("div", "chart-empty", "No impression values are available for this show."));
+      wrap.append(element("div", "chart-empty", `No ${metricContextLabel(selectedMetric()).toLowerCase()} values are available for this show.`));
       return wrap;
     }
 
@@ -352,14 +683,14 @@
     const x = index => margin.left + (show.segments.length <= 1 ? plotWidth / 2 : index * plotWidth / (show.segments.length - 1));
     const y = value => margin.top + plotHeight - (value / niceMax) * plotHeight;
     const svg = svgElement("svg", { viewBox: `0 0 ${width} ${height}`, class: "ratings-chart", role: "img" });
-    svg.setAttribute("aria-label", `${show.name}, P18+ impressions by quarter hour for ${SERIES.map(s => `${s.label} ${formatShortDate(state.data.comparisonDates[s.key])}`).join(", ")}`);
+    svg.setAttribute("aria-label", `${show.name}, ${selectedDemographic()?.label || "selected audience"} ${metricContextLabel(selectedMetric())} by quarter hour for ${SERIES.map(s => `${s.label} ${formatShortDate(state.data.comparisonDates[s.key])}`).join(", ")}`);
 
     for (let tick = 0; tick <= 4; tick++) {
       const value = niceMax * tick / 4;
       const tickY = y(value);
       svg.append(svgElement("line", { x1: margin.left, y1: tickY, x2: width - margin.right, y2: tickY, class: "chart-grid" }));
       const label = svgElement("text", { x: margin.left - 9, y: tickY + 4, class: "chart-axis-label", "text-anchor": "end" });
-      label.textContent = compactFormatter.format(value);
+      label.textContent = formatMetricValue(value, true);
       svg.append(label);
     }
 
@@ -382,7 +713,7 @@
         for (const point of run) {
           const circle = svgElement("circle", { cx: x(point.index), cy: y(point.value), r: series.key === "selected" ? 3.5 : 2.6, class: `chart-point ${series.seriesClass}` });
           const title = svgElement("title");
-          title.textContent = `${show.segments[point.index].label} — ${series.label}: ${formatNumber(point.value)} impressions`;
+          title.textContent = `${show.segments[point.index].label} — ${series.label}: ${formatMetricValue(point.value)}${metricUnitText()}`;
           circle.append(title);
           svg.append(circle);
         }
@@ -395,7 +726,7 @@
 
   function createTable(show) {
     const panel = element("section", "table-panel");
-    panel.append(element("h3", "", "Exact quarter-hour results"));
+    panel.append(element("h3", "", `Exact quarter-hour ${metricContextLabel(selectedMetric()).toLowerCase()}`));
     const scroll = element("div", "table-scroll");
     scroll.setAttribute("tabindex", "0");
     scroll.setAttribute("role", "region");
@@ -436,7 +767,7 @@
       cell.append(missing);
       return cell;
     }
-    cell.append(element("span", "stat-main", formatNumber(item.value)));
+    cell.append(element("span", "stat-main", formatMetricValue(item.value)));
     appendValueMetadata(cell, item);
     return cell;
   }
@@ -449,7 +780,7 @@
     const className = change > 0 ? "stat-change stat-change--positive" : change < 0 ? "stat-change stat-change--negative" : "stat-change";
     const sign = change > 0 ? "+" : "";
     const percentText = Number.isFinite(percent) ? ` (${sign}${percent.toFixed(1)}%)` : "";
-    cell.append(element("span", className, `${sign}${formatNumber(change)}${percentText}`));
+    cell.append(element("span", className, `${sign}${formatMetricValue(change)}${percentText}`));
     return cell;
   }
 
@@ -460,6 +791,13 @@
 
   function renderWarnings() {
     const messages = [];
+    const demographic = selectedDemographic();
+    const metric = selectedMetric();
+    if (!demographic) messages.push("No audience options are available for this report date.");
+    else if (!demographic.available) messages.push(`${demographic.label} is unavailable for this report date.`);
+    if (!metric) messages.push(`No measures are available for ${demographic?.label || "the selected audience"} on this report date.`);
+    else if (!metric.available) messages.push(`${metric.label} is unavailable for ${demographic?.label || "the selected audience"} on this report date.`);
+    if (state.capabilityNotice) messages.push(state.capabilityNotice);
     if (state.status?.sourceAvailable === false) messages.push(shareErrorText(state.status));
     if (state.data.isStale || state.status?.isStale) messages.push("Data may be stale. The desktop app/server has not completed a recent report refresh.");
     if (state.data.warnings.length) {
@@ -499,17 +837,24 @@
     }
   }
 
+  function isSelectionError(error) {
+    const code = safeString(error?.body?.errorCode || error?.body?.code).toLowerCase();
+    return code === "invalid_rating_selection" || code === "rating_selection_unavailable";
+  }
+
   function shareErrorText(info) {
     const location = safeString(info?.sourceDisplayName);
     return `Cannot access ${location || "the configured report location"}. Check the desktop app/server for file share permissions.${info?.message ? ` ${safeString(info.message)}` : ""}`;
   }
 
   function showLoading(visible) {
+    state.isLoading = visible;
     dom.loading.hidden = !visible;
     if (visible) {
       dom.message.hidden = true;
       dom.showList.hidden = true;
     }
+    renderSelectors();
   }
 
   function showMessage(title, body, retry) {
@@ -603,6 +948,107 @@
     return Number.isFinite(number) ? number : null;
   }
 
+  function firstPresent(source, keys) {
+    if (!source || typeof source !== "object") return undefined;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) return source[key];
+    }
+    return undefined;
+  }
+
+  function firstArrayProperty(source, keys) {
+    if (!source || typeof source !== "object") return null;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(source, key) && Array.isArray(source[key])) return source[key];
+    }
+    return null;
+  }
+
+  function normalizeIdList(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(extractSelectionId).filter(Boolean);
+  }
+
+  function normalizeSelectionPair(value) {
+    if (!value || typeof value !== "object") return null;
+    const demographicId = extractSelectionId(value.demographicId ?? value.demographic ?? value.audienceId ?? value.audience);
+    const metricId = extractSelectionId(value.metricId ?? value.metric ?? value.measureId ?? value.measure);
+    return demographicId && metricId ? { demographicId, metricId } : null;
+  }
+
+  function clampDecimals(value) {
+    const number = finiteOrNull(value);
+    return Number.isInteger(number) ? Math.min(6, Math.max(0, number)) : null;
+  }
+
+  function normalizeToken(value) { return safeString(value).toLowerCase().replace(/[^a-z0-9]+/g, ""); }
+  function sameId(left, right) { return Boolean(left && right) && safeString(left).toLowerCase() === safeString(right).toLowerCase(); }
+
+  function formatMetricValue(value, compact = false) {
+    if (!Number.isFinite(value)) return "—";
+    const metric = selectedMetric() || DEFAULT_METRIC;
+    const format = normalizeToken(metric.format);
+    const unit = normalizeToken(metric.unit);
+    const isPercent = format === "percent" || format === "percentage" || unit === "percent" || metric.unit === "%" || metric.suffix === "%";
+    const decimals = metric.decimals ?? (isPercent || format === "decimal" ? 1 : 0);
+    let formatted;
+    if (compact && !isPercent && !metric.prefix && !metric.suffix) {
+      formatted = compactFormatter.format(value);
+    } else {
+      formatted = new Intl.NumberFormat(undefined, {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals
+      }).format(value);
+    }
+    const suffix = metric.suffix || (isPercent ? "%" : "");
+    return `${metric.prefix || ""}${formatted}${suffix}`;
+  }
+
+  function metricContextLabel(metric) {
+    if (!metric) return "Measure unavailable";
+    const label = metric.label || metric.id;
+    const unit = safeString(metric.unit);
+    const labelToken = normalizeToken(label);
+    const unitToken = normalizeToken(unit);
+    if (!unit || unit === "%" || unitToken === "percent" || labelToken.includes(unitToken)) return label;
+    return `${label} (${unit})`;
+  }
+
+  function metricUnitText() {
+    const metric = selectedMetric() || DEFAULT_METRIC;
+    if (!metric.unit || metric.unit === "%" || normalizeToken(metric.unit) === "percent" || metric.suffix === "%") return "";
+    return ` ${metric.unit}`;
+  }
+
+  function restoreSelection() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      if (!saved || typeof saved !== "object") return;
+      if (safeString(saved.demographicId)) state.demographicId = safeString(saved.demographicId);
+      if (safeString(saved.metricId)) state.metricId = safeString(saved.metricId);
+      state.selectionRestored = Boolean(safeString(saved.demographicId) && safeString(saved.metricId));
+      if (saved.metricByDemographic && typeof saved.metricByDemographic === "object") {
+        for (const [key, value] of Object.entries(saved.metricByDemographic)) {
+          if (normalizeToken(key) && safeString(value)) state.metricByDemographic[normalizeToken(key)] = safeString(value);
+        }
+      }
+    } catch {
+      // Storage can be unavailable in locked-down browsers; selection remains session-local.
+    }
+  }
+
+  function saveSelection() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        demographicId: state.demographicId,
+        metricId: state.metricId,
+        metricByDemographic: state.metricByDemographic
+      }));
+    } catch {
+      // The view continues to work when storage is unavailable or full.
+    }
+  }
+
   function safeString(value) { return typeof value === "string" ? value.trim() : ""; }
   function slug(value) { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "ratings"; }
   function applyDisplayTitle(value) {
@@ -614,7 +1060,6 @@
   function normalizeIsoDate(value) { return typeof value === "string" && isIsoDate(value.slice(0, 10)) ? value.slice(0, 10) : null; }
   function formatDate(value) { return isIsoDate(value) ? dateFormatter.format(new Date(`${value}T00:00:00Z`)) : "Unknown date"; }
   function formatShortDate(value) { return isIsoDate(value) ? shortDateFormatter.format(new Date(`${value}T00:00:00Z`)) : "Unavailable"; }
-  function formatNumber(value) { return Number.isFinite(value) ? integerFormatter.format(Math.round(value)) : "—"; }
   function formatTimestamp(value) {
     const date = new Date(value);
     return Number.isNaN(date.valueOf()) ? "time unavailable" : new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);

@@ -153,7 +153,7 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
 
         var metricRow = rows[metricIndex];
         var demoIndex = FindPreviousRow(rows, metricIndex, row =>
-            row.Cells.Values.Any(value => HeaderEquals(value, "P18+")));
+            row.Cells.Values.Any(value => HeaderEquals(value, "Demo")));
         var sourceIndex = demoIndex < 0
             ? -1
             : FindPreviousRow(rows, demoIndex, row =>
@@ -161,7 +161,7 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
 
         if (demoIndex < 0 || sourceIndex < 0)
         {
-            return new(null, true, "Viewing Source and P18+ header levels were not found.");
+            return new(null, true, "Viewing Source and demographic header levels were not found.");
         }
 
         var timeColumn = metricRow.Cells
@@ -175,8 +175,42 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
         var bindings = FindBindings(rows[sourceIndex], rows[demoIndex], metricRow, timeColumn);
         if (bindings.Count == 0)
         {
-            return new(null, true, "No Viewing Source contains P18+ Dom Pgm Name and IMP columns.");
+            return new(null, true, "No Viewing Source contains demographic program and metric columns.");
         }
+
+        var demographics = bindings
+            .Select(binding => binding.Demographic)
+            .DistinctBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var metrics = bindings
+            .SelectMany(binding => binding.Metrics)
+            .Select(binding => binding.Definition)
+            .DistinctBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var selections = bindings
+            .SelectMany(binding => binding.Metrics.Select(metric =>
+                new RatingSelection(binding.Demographic.Id, metric.Definition.Id)))
+            .DistinctBy(
+                selection => $"{selection.DemographicId}\u001f{selection.MetricId}",
+                StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var preferred = selections.FirstOrDefault(selection =>
+            string.Equals(selection.DemographicId, "p18-plus", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(selection.MetricId, "imp", StringComparison.OrdinalIgnoreCase)) ??
+            selections.First();
+        var capabilities = new RatingCapabilities(
+            demographics,
+            metrics,
+            selections,
+            preferred.DemographicId,
+            preferred.MetricId);
+        var selectionIndexes = selections
+            .Select((selection, index) => new
+            {
+                Key = SelectionKey(selection.DemographicId, selection.MetricId),
+                Index = index
+            })
+            .ToDictionary(item => item.Key, item => item.Index, StringComparer.OrdinalIgnoreCase);
 
         if (!TryFindReportDate(rows, metricIndex, worksheetName, path, out var reportDate, out var dateMessage))
         {
@@ -194,33 +228,51 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
                 continue;
             }
 
-            foreach (var binding in bindings)
+            foreach (var sourceBindings in bindings.GroupBy(
+                         binding => binding.Source,
+                         StringComparer.OrdinalIgnoreCase))
             {
-                if (!row.Cells.TryGetValue(binding.ProgramColumn, out var program) ||
-                    string.IsNullOrWhiteSpace(program))
+                var program = sourceBindings
+                    .Select(binding => row.Cells.GetValueOrDefault(binding.ProgramColumn))
+                    .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+                if (string.IsNullOrWhiteSpace(program))
                 {
                     continue;
                 }
 
-                decimal? impressions = null;
-                if (row.Cells.TryGetValue(binding.ImpressionColumn, out var rawImpressions) &&
-                    decimal.TryParse(
-                        rawImpressions,
-                        NumberStyles.Float,
-                        CultureInfo.InvariantCulture,
-                        out var parsedImpressions))
+                var values = new decimal?[selections.Length];
+                foreach (var binding in sourceBindings)
                 {
-                    impressions = parsedImpressions;
+                    foreach (var metric in binding.Metrics)
+                    {
+                        if (row.Cells.TryGetValue(metric.Column, out var rawValue) &&
+                            decimal.TryParse(
+                                rawValue,
+                                NumberStyles.Float,
+                                CultureInfo.InvariantCulture,
+                                out var parsedValue))
+                        {
+                            values[selectionIndexes[SelectionKey(
+                                binding.Demographic.Id,
+                                metric.Definition.Id)]] = parsedValue;
+                        }
+                    }
                 }
 
+                var impressionIndex = selectionIndexes.GetValueOrDefault(
+                    SelectionKey("p18-plus", "imp"),
+                    -1);
+                var impressions = impressionIndex >= 0 ? values[impressionIndex] : null;
+
                 segments.Add(new RatingSegment(
-                    binding.Source,
+                    sourceBindings.Key,
                     GlobMatcher.Normalize(program),
                     GlobMatcher.Normalize(timeLabel),
                     startMinute,
                     endMinute,
                     broadcastOrder,
-                    impressions));
+                    impressions,
+                    values));
             }
 
             broadcastOrder++;
@@ -233,11 +285,17 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
 
         if (segments.Count == 0)
         {
-            return new(null, true, "The worksheet contains 15-minute rows but no P18+ program data.");
+            return new(null, true, "The worksheet contains 15-minute rows but no demographic program data.");
         }
 
         return new(
-            new RatingReport(reportDate, path, worksheetName, lastModifiedUtc, segments),
+            new RatingReport(
+                reportDate,
+                path,
+                worksheetName,
+                lastModifiedUtc,
+                segments,
+                capabilities),
             true,
             null);
     }
@@ -246,10 +304,15 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
     {
         for (var index = 0; index < rows.Count; index++)
         {
-            var values = rows[index].Cells.Values;
-            if (values.Any(value => HeaderEquals(value, "Time / Metrics")) &&
-                values.Any(value => HeaderEquals(value, "Dom Pgm Name")) &&
-                values.Any(value => HeaderEquals(value, "IMP")))
+            var cells = rows[index].Cells;
+            var timeColumn = cells.FirstOrDefault(pair => HeaderEquals(pair.Value, "Time / Metrics")).Key;
+            var programColumns = cells
+                .Where(pair => pair.Key > timeColumn && HeaderEquals(pair.Value, "Dom Pgm Name"))
+                .Select(pair => pair.Key)
+                .ToArray();
+            if (timeColumn > 0 &&
+                programColumns.Length > 0 &&
+                cells.Any(pair => pair.Key > programColumns[0] && !HeaderEquals(pair.Value, "Dom Pgm Name")))
             {
                 return index;
             }
@@ -274,7 +337,7 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
         return -1;
     }
 
-    private static List<ColumnBinding> FindBindings(
+    private static List<DemographicBinding> FindBindings(
         RowValues sourceRow,
         RowValues demoRow,
         RowValues metricRow,
@@ -289,12 +352,12 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
             .Where(pair => pair.Key > timeColumn && !HeaderEquals(pair.Value, "Viewing Source"))
             .OrderBy(pair => pair.Key)
             .ToArray();
-        var bindings = new List<ColumnBinding>();
+        var bindings = new List<DemographicBinding>();
 
         for (var index = 0; index < demoStarts.Length; index++)
         {
             var start = demoStarts[index];
-            if (!demoRow.Cells.TryGetValue(start, out var demo) || !HeaderEquals(demo, "P18+"))
+            if (!demoRow.Cells.TryGetValue(start, out var demo) || string.IsNullOrWhiteSpace(demo))
             {
                 continue;
             }
@@ -302,15 +365,21 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
             var end = index + 1 < demoStarts.Length ? demoStarts[index + 1] - 1 : int.MaxValue;
             var metrics = metricRow.Cells.Where(pair => pair.Key >= start && pair.Key <= end).ToArray();
             var programColumn = metrics.FirstOrDefault(pair => HeaderEquals(pair.Value, "Dom Pgm Name")).Key;
-            var impressionColumn = metrics.FirstOrDefault(pair => HeaderEquals(pair.Value, "IMP")).Key;
+            var metricBindings = metrics
+                .Where(pair => pair.Key != programColumn && !string.IsNullOrWhiteSpace(pair.Value))
+                .Select(pair => new MetricBinding(
+                    RatingFieldDefinition.CreateMetric(pair.Value),
+                    pair.Key))
+                .ToArray();
             var source = sourceStarts.LastOrDefault(pair => pair.Key <= start).Value;
 
-            if (programColumn > 0 && impressionColumn > 0 && !string.IsNullOrWhiteSpace(source))
+            if (programColumn > 0 && metricBindings.Length > 0 && !string.IsNullOrWhiteSpace(source))
             {
-                bindings.Add(new ColumnBinding(
+                bindings.Add(new DemographicBinding(
                     GlobMatcher.Normalize(source),
+                    RatingFieldDefinition.CreateDemographic(demo),
                     programColumn,
-                    impressionColumn));
+                    metricBindings));
             }
         }
 
@@ -381,6 +450,9 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
             GlobMatcher.Normalize(actual ?? string.Empty),
             expected,
             StringComparison.OrdinalIgnoreCase);
+
+    private static string SelectionKey(string demographicId, string metricId) =>
+        $"{demographicId}\u001f{metricId}";
 
     private static bool TryFindReportDate(
         IReadOnlyList<RowValues> rows,
@@ -508,7 +580,13 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
 
     private sealed record RowValues(uint RowNumber, IReadOnlyDictionary<int, string> Cells);
 
-    private sealed record ColumnBinding(string Source, int ProgramColumn, int ImpressionColumn);
+    private sealed record DemographicBinding(
+        string Source,
+        RatingDemographicDefinition Demographic,
+        int ProgramColumn,
+        IReadOnlyList<MetricBinding> Metrics);
+
+    private sealed record MetricBinding(RatingMetricDefinition Definition, int Column);
 
     private sealed record WorksheetParseResult(
         RatingReport? Report,

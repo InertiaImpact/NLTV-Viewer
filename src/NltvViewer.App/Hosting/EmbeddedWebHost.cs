@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using Microsoft.AspNetCore.HttpOverrides;
 using NltvViewer.App.Configuration;
+using NltvViewer.Core.Reports;
 
 namespace NltvViewer.App.Hosting;
 
@@ -13,6 +14,7 @@ public sealed record ViewerServerStatus(
     DateTimeOffset? LastRefreshAttempt,
     DateTimeOffset? LastSuccessfulRefresh,
     bool SourceAccessible,
+    RatingCapabilities Capabilities,
     IReadOnlyList<string> Warnings);
 
 public interface IEmbeddedWebHost : IAsyncDisposable
@@ -48,6 +50,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
         null,
         null,
         false,
+        RatingCapabilities.Empty,
         []);
 
     public EmbeddedWebHost(IViewerDataGateway dataGateway)
@@ -166,6 +169,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                     : Status.LastSuccessfulRefresh,
                 SourceAccessible = dataStatus.SourceAvailable,
                 Message = dataStatus.Message,
+                Capabilities = dataStatus.Capabilities,
                 Warnings = dataStatus.Warnings,
             });
         }
@@ -321,6 +325,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                 errorCode = dataStatus.ErrorCode,
                 message = status.Message,
                 hasUsableReports = dataStatus.HasUsableReports,
+                capabilities = dataStatus.Capabilities,
                 running = status.IsRunning,
                 refreshing = status.IsRefreshing,
                 viewerUrl = status.ViewerUrl,
@@ -343,6 +348,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                     message = dataStatus.Message,
                     sourceAvailable = dataStatus.SourceAvailable,
                     sourceDisplayName = dataStatus.SourceDisplayName,
+                    capabilities = dataStatus.Capabilities,
                     warnings = dataStatus.Warnings,
                 });
             }
@@ -350,7 +356,13 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
             return Results.Ok(
                 await _dataGateway.GetDaysAsync(cancellationToken).ConfigureAwait(false));
         });
-        application.MapGet("/api/v1/ratings", async (string? date, CancellationToken cancellationToken) =>
+        application.MapGet("/api/v1/capabilities", () =>
+            Results.Ok(_dataGateway.Status.Capabilities));
+        application.MapGet("/api/v1/ratings", async (
+            string? date,
+            string? demographic,
+            string? metric,
+            CancellationToken cancellationToken) =>
         {
             if (!DateOnly.TryParseExact(
                 date,
@@ -372,16 +384,34 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                     message = dataStatus.Message,
                     sourceAvailable = dataStatus.SourceAvailable,
                     sourceDisplayName = dataStatus.SourceDisplayName,
+                    capabilities = dataStatus.Capabilities,
                     warnings = dataStatus.Warnings,
                 });
             }
 
-            var result = await _dataGateway
-                .GetRatingsAsync(parsedDate, cancellationToken)
-                .ConfigureAwait(false);
-            return result is null
-                ? Results.NotFound(new { error = $"No ratings are available for {date}." })
-                : Results.Ok(result);
+            try
+            {
+                var result = await _dataGateway
+                    .GetRatingsAsync(parsedDate, demographic, metric, cancellationToken)
+                    .ConfigureAwait(false);
+                return result is null
+                    ? Results.NotFound(new { error = $"No ratings are available for {date}." })
+                    : Results.Ok(result);
+            }
+            catch (RatingSelectionException exception)
+            {
+                var problem = new
+                {
+                    errorCode = exception.IsInvalidRequest
+                        ? "invalid_rating_selection"
+                        : "rating_selection_unavailable",
+                    message = exception.Message,
+                    capabilities = exception.Capabilities,
+                };
+                return exception.IsInvalidRequest
+                    ? Results.BadRequest(problem)
+                    : Results.UnprocessableEntity(problem);
+            }
         });
         application.MapFallbackToFile("index.html");
         return application;

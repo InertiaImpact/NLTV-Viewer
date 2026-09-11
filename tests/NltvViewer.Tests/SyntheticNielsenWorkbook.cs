@@ -91,6 +91,77 @@ internal static class SyntheticNielsenWorkbook
         workbookPart.Workbook.Save();
     }
 
+    public static void CreateDynamic(string path, DateOnly reportDate)
+    {
+        using var document = SpreadsheetDocument.Create(path, SpreadsheetDocumentType.Workbook);
+        var workbookPart = document.AddWorkbookPart();
+        workbookPart.Workbook = new Workbook();
+        var sheets = workbookPart.Workbook.AppendChild(new Sheets());
+        var rows = new List<Row>
+        {
+            CreateRow(10, TextCell("A10", $"Dates: {reportDate:MM/dd/yyyy} - {reportDate:MM/dd/yyyy}")),
+            CreateRow(
+                13,
+                TextCell("A13", "Daypart"), TextCell("B13", "Viewing Source"),
+                TextCell("C13", "ALPHA 1.1"), TextCell("M13", "ALPHA 1.2")),
+            CreateRow(
+                14,
+                TextCell("A14", "Daypart"), TextCell("B14", "Demo"),
+                TextCell("C14", "HH"), TextCell("H14", "P18+"),
+                TextCell("M14", "HH"), TextCell("R14", "P25-54")),
+            CreateRow(
+                15,
+                TextCell("A15", "Daypart"), TextCell("B15", "Time / Metrics"),
+                TextCell("C15", "Dom Pgm Name"), TextCell("D15", "RTG % (X.X)"),
+                TextCell("E15", "SHR %"), TextCell("F15", "IMP"), TextCell("G15", "HUT/PUT % (X.X)"),
+                TextCell("H15", "Dom Pgm Name"), TextCell("I15", "RTG % (X.X)"),
+                TextCell("J15", "SHR %"), TextCell("K15", "IMP"), TextCell("L15", "HUT/PUT % (X.X)"),
+                TextCell("M15", "Dom Pgm Name"), TextCell("N15", "RTG % (X.X)"),
+                TextCell("O15", "SHR %"), TextCell("P15", "IMP"), TextCell("Q15", "HUT/PUT % (X.X)"),
+                TextCell("R15", "Dom Pgm Name"), TextCell("U15", "IMP")),
+            CreateRow(
+                16,
+                TextCell("B16", "6:00pm - 6:15pm"),
+                TextCell("C16", "ALPHA NEWS"), NumberCell("D16", 1.25m), NumberCell("E16", 4.5m),
+                NumberCell("F16", 1000m), NumberCell("G16", 33.3m),
+                TextCell("H16", "ALPHA NEWS"), NumberCell("I16", 2.75m), NumberCell("J16", 5.5m),
+                NumberCell("K16", 2000m), NumberCell("L16", 44.4m),
+                TextCell("M16", "ALPHA ALT NEWS"), NumberCell("N16", 0m), NumberCell("O16", 1.5m),
+                NumberCell("P16", 3000m), NumberCell("Q16", 55.5m),
+                TextCell("R16", "ALPHA ALT NEWS"), NumberCell("U16", 4000m))
+        };
+        AddSheet(workbookPart, sheets, $"{reportDate:M.d.yy} Daily", rows);
+        workbookPart.Workbook.Save();
+    }
+
+    public static void CreateWithoutPreferredFields(string path, DateOnly reportDate)
+    {
+        using var document = SpreadsheetDocument.Create(path, SpreadsheetDocumentType.Workbook);
+        var workbookPart = document.AddWorkbookPart();
+        workbookPart.Workbook = new Workbook();
+        var sheets = workbookPart.Workbook.AppendChild(new Sheets());
+        AddSheet(workbookPart, sheets, "Daily", [
+            CreateRow(10, TextCell("A10", $"Dates: {reportDate:MM/dd/yyyy} - {reportDate:MM/dd/yyyy}")),
+            CreateRow(
+                13,
+                TextCell("A13", "Daypart"), TextCell("B13", "Viewing Source"),
+                TextCell("C13", "ALPHA 1.1")),
+            CreateRow(
+                14,
+                TextCell("A14", "Daypart"), TextCell("B14", "Demo"),
+                TextCell("C14", "P12-17")),
+            CreateRow(
+                15,
+                TextCell("A15", "Daypart"), TextCell("B15", "Time / Metrics"),
+                TextCell("C15", "Dom Pgm Name"), TextCell("D15", "INDEX (X.X)")),
+            CreateRow(
+                16,
+                TextCell("B16", "6:00pm - 6:15pm"), TextCell("C16", "ALPHA NEWS"),
+                NumberCell("D16", 7.5m))
+        ]);
+        workbookPart.Workbook.Save();
+    }
+
     private static void AddSourceCells(
         List<Cell> cells,
         uint rowNumber,

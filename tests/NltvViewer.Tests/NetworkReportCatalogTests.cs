@@ -53,6 +53,8 @@ public sealed class NetworkReportCatalogTests
 
         Assert.Equal(0, secondParser.Count);
         Assert.True((await secondCatalog.GetAsync(CountingParser.ReportDate)).Found);
+        Assert.Equal(1, secondParser.Count);
+        Assert.DoesNotContain("\"values\":[", await File.ReadAllTextAsync(cachePath), StringComparison.Ordinal);
     }
 
     [Fact]

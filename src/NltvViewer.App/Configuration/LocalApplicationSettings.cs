@@ -20,6 +20,10 @@ public sealed class LocalApplicationSettings
 
     public int PollingIntervalMinutes { get; set; } = 15;
 
+    public string DefaultDemographicId { get; set; } = string.Empty;
+
+    public string DefaultMetricId { get; set; } = string.Empty;
+
     public bool StartAtSignIn { get; set; }
 
     public List<ShowGroupConfiguration> ShowGroups { get; set; } = [];
@@ -99,6 +103,12 @@ public static class LocalApplicationSettingsValidator
         if (settings.PollingIntervalMinutes is < 1 or > 1440)
         {
             errors.Add("Polling interval must be between 1 and 1440 minutes.");
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.DefaultDemographicId)
+            != string.IsNullOrWhiteSpace(settings.DefaultMetricId))
+        {
+            errors.Add("Preferred demographic and metric must both be Auto, or both be selected.");
         }
 
         ValidatePathBase(settings.PathBase, errors);

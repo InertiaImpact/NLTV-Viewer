@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using NltvViewer.App.Configuration;
 using NltvViewer.App.Hosting;
+using NltvViewer.Core.Reports;
 
 namespace NltvViewer.App.Forms;
 
@@ -17,6 +18,8 @@ public sealed class MainForm : Form
     private readonly TextBox _bindAddressText = new();
     private readonly TextBox _pathBaseText = new();
     private readonly NumericUpDown _pollingIntervalInput = new();
+    private readonly ComboBox _defaultDemographicInput = new();
+    private readonly ComboBox _defaultMetricInput = new();
     private readonly CheckBox _startAtSignInCheck = new();
     private readonly DataGridView _showGroupsGrid = new();
     private readonly Label _serverStateLabel = new();
@@ -27,6 +30,8 @@ public sealed class MainForm : Form
     private LocalApplicationSettings _appliedSettings;
     private bool _allowClose;
     private bool _busy;
+    private bool _populatingRatingChoices;
+    private RatingCapabilities _ratingCapabilities = RatingCapabilities.Empty;
 
     public MainForm(
         LocalApplicationSettings settings,
@@ -217,9 +222,22 @@ public sealed class MainForm : Form
         _pollingIntervalInput.Width = 100;
         AddSetting(panel, 2, "nginx path base", _pathBaseText, "Polling (minutes)", _pollingIntervalInput);
 
+        _defaultDemographicInput.Dock = DockStyle.Fill;
+        _defaultDemographicInput.DropDownStyle = ComboBoxStyle.DropDownList;
+        _defaultDemographicInput.SelectedIndexChanged += OnPreferredDemographicChanged;
+        _defaultMetricInput.Dock = DockStyle.Fill;
+        _defaultMetricInput.DropDownStyle = ComboBoxStyle.DropDownList;
+        AddSetting(
+            panel,
+            3,
+            "Preferred demographic",
+            _defaultDemographicInput,
+            "Preferred metric",
+            _defaultMetricInput);
+
         _startAtSignInCheck.Text = "Start at Windows sign-in";
         _startAtSignInCheck.AutoSize = true;
-        panel.Controls.Add(_startAtSignInCheck, 1, 3);
+        panel.Controls.Add(_startAtSignInCheck, 1, 4);
         panel.SetColumnSpan(_startAtSignInCheck, 3);
         return panel;
     }
@@ -357,6 +375,10 @@ public sealed class MainForm : Form
             settings.PollingIntervalMinutes,
             (int)_pollingIntervalInput.Minimum,
             (int)_pollingIntervalInput.Maximum);
+        PopulateRatingChoices(
+            _ratingCapabilities,
+            settings.DefaultDemographicId,
+            settings.DefaultMetricId);
         _startAtSignInCheck.Checked = settings.StartAtSignIn;
         _showGroupsGrid.Rows.Clear();
         foreach (var group in settings.ShowGroups)
@@ -399,6 +421,8 @@ public sealed class MainForm : Form
             BindAddress = _bindAddressText.Text.Trim(),
             PathBase = _pathBaseText.Text.Trim(),
             PollingIntervalMinutes = Decimal.ToInt32(_pollingIntervalInput.Value),
+            DefaultDemographicId = SelectedChoiceId(_defaultDemographicInput),
+            DefaultMetricId = SelectedChoiceId(_defaultMetricInput),
             StartAtSignIn = _startAtSignInCheck.Checked,
             ShowGroups = groups,
         };
@@ -605,6 +629,9 @@ public sealed class MainForm : Form
 
     private void UpdateServerStatus(ViewerServerStatus status)
     {
+        var selectedDemographic = SelectedChoiceId(_defaultDemographicInput);
+        var selectedMetric = SelectedChoiceId(_defaultMetricInput);
+        PopulateRatingChoices(status.Capabilities, selectedDemographic, selectedMetric);
         _serverStateLabel.Text = status.IsRunning ? "Server running" : "Server stopped";
         _serverStateLabel.ForeColor = status.IsRunning ? Color.DarkGreen : Color.DarkRed;
         _viewerUrlLink.Text = status.ViewerUrl;
@@ -719,6 +746,120 @@ public sealed class MainForm : Form
     private static string FormatTime(TimeOnly? value) =>
         value?.ToString("HH:mm", CultureInfo.InvariantCulture) ?? string.Empty;
 
+    private void PopulateRatingChoices(
+        RatingCapabilities capabilities,
+        string? selectedDemographicId,
+        string? selectedMetricId)
+    {
+        _populatingRatingChoices = true;
+        try
+        {
+            _ratingCapabilities = capabilities;
+            _defaultDemographicInput.Items.Clear();
+            _defaultDemographicInput.Items.Add(RatingChoice.Auto);
+            foreach (var demographic in capabilities.Demographics)
+            {
+                _defaultDemographicInput.Items.Add(new RatingChoice(
+                    demographic.Id,
+                    demographic.Label));
+            }
+
+            AddUnavailableChoiceIfNeeded(
+                _defaultDemographicInput,
+                selectedDemographicId,
+                "Unavailable audience");
+            SelectChoice(_defaultDemographicInput, selectedDemographicId);
+            PopulateMetricChoices(selectedMetricId);
+        }
+        finally
+        {
+            _populatingRatingChoices = false;
+        }
+    }
+
+    private void PopulateMetricChoices(string? selectedMetricId)
+    {
+        var demographicId = SelectedChoiceId(_defaultDemographicInput);
+        _defaultMetricInput.Items.Clear();
+        _defaultMetricInput.Items.Add(RatingChoice.Auto);
+        if (!string.IsNullOrWhiteSpace(demographicId))
+        {
+            var validMetricIds = _ratingCapabilities.AvailableSelections
+                .Where(selection => string.Equals(
+                    selection.DemographicId,
+                    demographicId,
+                    StringComparison.OrdinalIgnoreCase))
+                .Select(selection => selection.MetricId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var metric in _ratingCapabilities.Metrics.Where(metric =>
+                         validMetricIds.Contains(metric.Id)))
+            {
+                var unit = string.IsNullOrWhiteSpace(metric.Unit) ? string.Empty : $" ({metric.Unit})";
+                _defaultMetricInput.Items.Add(new RatingChoice(
+                    metric.Id,
+                    $"{metric.Label}{unit}"));
+            }
+
+            AddUnavailableChoiceIfNeeded(
+                _defaultMetricInput,
+                selectedMetricId,
+                "Unavailable measure");
+        }
+
+        SelectChoice(
+            _defaultMetricInput,
+            string.IsNullOrWhiteSpace(demographicId) ? null : selectedMetricId);
+        _defaultMetricInput.Enabled = !string.IsNullOrWhiteSpace(demographicId);
+    }
+
+    private void OnPreferredDemographicChanged(object? sender, EventArgs e)
+    {
+        if (!_populatingRatingChoices)
+        {
+            _populatingRatingChoices = true;
+            try
+            {
+                PopulateMetricChoices(selectedMetricId: null);
+            }
+            finally
+            {
+                _populatingRatingChoices = false;
+            }
+        }
+    }
+
+    private static void AddUnavailableChoiceIfNeeded(
+        ComboBox input,
+        string? selectedId,
+        string label)
+    {
+        if (string.IsNullOrWhiteSpace(selectedId)
+            || input.Items.Cast<RatingChoice>().Any(choice => string.Equals(
+                choice.Id,
+                selectedId,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        input.Items.Add(new RatingChoice(selectedId.Trim(), $"{label}: {selectedId.Trim()}"));
+    }
+
+    private static void SelectChoice(ComboBox input, string? selectedId)
+    {
+        var index = input.Items.Cast<RatingChoice>()
+            .Select((choice, index) => (choice, index))
+            .FirstOrDefault(pair => string.Equals(
+                pair.choice.Id,
+                selectedId?.Trim() ?? string.Empty,
+                StringComparison.OrdinalIgnoreCase))
+            .index;
+        input.SelectedIndex = index;
+    }
+
+    private static string SelectedChoiceId(ComboBox input) =>
+        input.SelectedItem is RatingChoice choice ? choice.Id : string.Empty;
+
     private static TimeOnly? ParseOptionalTime(string value, string fieldName)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -737,5 +878,12 @@ public sealed class MainForm : Form
         }
 
         throw new FormatException($"{fieldName} '{value}' is invalid. Use HH:mm, such as 17:30.");
+    }
+
+    private sealed record RatingChoice(string Id, string Label)
+    {
+        public static RatingChoice Auto { get; } = new(string.Empty, "Auto (report default)");
+
+        public override string ToString() => Label;
     }
 }
