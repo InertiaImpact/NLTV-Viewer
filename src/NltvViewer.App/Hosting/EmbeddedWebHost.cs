@@ -9,6 +9,7 @@ namespace NltvViewer.App.Hosting;
 public sealed record ViewerServerStatus(
     bool IsRunning,
     bool IsRefreshing,
+    string Version,
     string ViewerUrl,
     string Message,
     DateTimeOffset? LastRefreshAttempt,
@@ -45,6 +46,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
     private ViewerServerStatus _status = new(
         false,
         false,
+        ApplicationVersion.Informational,
         string.Empty,
         "Server is stopped.",
         null,
@@ -113,7 +115,10 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                 ViewerUrl = BuildViewerUrl(settings),
                 Message = "Server is running.",
             });
-            LocalLog.Write("Information", "server_started", BuildViewerUrl(settings));
+            LocalLog.Write(
+                "Information",
+                "server_started",
+                $"NLTV Viewer {ApplicationVersion.Informational} started at {BuildViewerUrl(settings)}");
         }
         catch (Exception exception)
         {
@@ -319,6 +324,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
             return Results.Ok(new
             {
                 lastRefreshUtc = dataStatus.LastRefreshUtc,
+                version = status.Version,
                 isStale = dataStatus.IsStale,
                 sourceAvailable = dataStatus.SourceAvailable,
                 sourceDisplayName = dataStatus.SourceDisplayName,
@@ -333,7 +339,6 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                 lastSuccessfulRefresh = status.LastSuccessfulRefresh,
                 sourceAccessible = status.SourceAccessible,
                 stale = dataStatus.IsStale,
-                warnings = dataStatus.Warnings,
             });
         });
         application.MapGet("/api/v1/days", async (CancellationToken cancellationToken) =>
@@ -349,7 +354,6 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                     sourceAvailable = dataStatus.SourceAvailable,
                     sourceDisplayName = dataStatus.SourceDisplayName,
                     capabilities = dataStatus.Capabilities,
-                    warnings = dataStatus.Warnings,
                 });
             }
 
@@ -385,7 +389,6 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                     sourceAvailable = dataStatus.SourceAvailable,
                     sourceDisplayName = dataStatus.SourceDisplayName,
                     capabilities = dataStatus.Capabilities,
-                    warnings = dataStatus.Warnings,
                 });
             }
 

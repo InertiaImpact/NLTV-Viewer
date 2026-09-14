@@ -169,7 +169,6 @@ public sealed class ViewerDataGateway : IViewerDataGateway
             errorCode = status.ErrorCode,
             message = status.Message,
             capabilities = status.Capabilities,
-            warnings = status.Warnings,
         };
         return Task.FromResult(response);
     }
@@ -289,7 +288,6 @@ public sealed class ViewerDataGateway : IViewerDataGateway
             isStale = status.IsStale,
             errorCode = status.ErrorCode,
             message = status.Message,
-            warnings = status.Warnings,
         };
     }
 

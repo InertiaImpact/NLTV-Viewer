@@ -52,7 +52,6 @@ Returns the same `capabilities` object shown in the ratings example below. The U
   },
   "selection": { "demographicId": "p18-plus", "metricId": "imp" },
   "isStale": false,
-  "warnings": [],
   "shows": [
     {
       "id": "evening-news-at-six",
@@ -93,6 +92,7 @@ It also accepts the Core comparison model directly: show fields `displayName`, `
 ```json
 {
   "lastRefreshUtc": "2026-09-11T18:30:00Z",
+  "version": "1.1.0",
   "displayTitle": "News Ratings",
   "isStale": false,
   "sourceAvailable": true,
@@ -103,6 +103,8 @@ It also accepts the Core comparison model directly: show fields `displayName`, `
 ```
 
 `displayTitle` is optional on either status or ratings. The checked-in page uses the neutral `News Ratings`; deployments can supply a branded title from local configuration without committing it to the repository.
+
+Detailed parser/catalog warnings are intentionally excluded from the public web API and view. Administrators can inspect them in the desktop application; refresh summaries remain in the local logs.
 
 When the report location cannot be read, use HTTP `503` and/or return `sourceAvailable: false` with a stable error code such as `SOURCE_UNAVAILABLE`. `sourceDisplayName` may contain the configured path if administrators intend that path to be visible to web viewers. The UI displays: “Cannot access X. Check the desktop app/server for file share permissions.”
 

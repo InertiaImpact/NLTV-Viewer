@@ -62,6 +62,7 @@
       statusDot: document.querySelector("#status-dot"),
       statusLabel: document.querySelector("#status-label"),
       lastRefresh: document.querySelector("#last-refresh"),
+      appVersion: document.querySelector("#app-version"),
       pageTitle: document.querySelector("#page-title"),
       measureSummary: document.querySelector("#measure-summary"),
       demographic: document.querySelector("#demographic-select"),
@@ -197,7 +198,8 @@
       sourceDisplayName: safeString(raw?.sourceDisplayName || raw?.sourceLocation || raw?.location),
       message: safeString(raw?.message || raw?.detail),
       errorCode: safeString(raw?.errorCode || raw?.code),
-      displayTitle: safeString(raw?.displayTitle || raw?.siteTitle)
+      displayTitle: safeString(raw?.displayTitle || raw?.siteTitle),
+      version: safeString(raw?.version || raw?.appVersion || raw?.applicationVersion || raw?.serverVersion || raw?.informationalVersion)
     };
   }
 
@@ -492,8 +494,8 @@
       },
       generatedAtUtc: raw?.generatedAtUtc || raw?.generatedAt || raw?.sourceLastModifiedUtc || null,
       isStale: Boolean(raw?.isStale),
-      warnings: Array.isArray(raw?.warnings) ? raw.warnings.map(warning => safeString(warning?.message || warning)).filter(Boolean) : [],
       displayTitle: safeString(raw?.displayTitle || raw?.siteTitle),
+      version: safeString(raw?.version || raw?.appVersion || raw?.applicationVersion || raw?.serverVersion || raw?.informationalVersion),
       shows: shows.map(normalizeShow).filter(show => show.name)
     };
   }
@@ -605,6 +607,7 @@
     updateNavigation();
     dom.dateSummary.textContent = formatDate(state.data.selectedDate);
     applyDisplayTitle(state.data.displayTitle || state.status?.displayTitle);
+    renderVersion(state.data.version || state.status?.version || "");
     renderSelectors();
 
     renderWarnings();
@@ -800,9 +803,6 @@
     if (state.capabilityNotice) messages.push(state.capabilityNotice);
     if (state.status?.sourceAvailable === false) messages.push(shareErrorText(state.status));
     if (state.data.isStale || state.status?.isStale) messages.push("Data may be stale. The desktop app/server has not completed a recent report refresh.");
-    if (state.data.warnings.length) {
-      messages.push(`${state.data.warnings.length} report file warnings are available in the desktop app/server log.`);
-    }
     if (messages.length) showNotice([...new Set(messages)].join(" "), state.status?.sourceAvailable === false);
   }
 
@@ -811,6 +811,7 @@
     dom.statusDot.className = `status-dot ${status.sourceAvailable ? "status-dot--ready" : "status-dot--error"}`;
     dom.statusLabel.textContent = status.sourceAvailable ? (status.isStale ? "Reports stale" : "Reports available") : "Report source unavailable";
     dom.lastRefresh.textContent = status.lastRefreshUtc ? `Last refresh ${formatTimestamp(status.lastRefreshUtc)}` : "Refresh time unavailable";
+    renderVersion(status.version);
     applyDisplayTitle(status.displayTitle);
   }
 
@@ -818,6 +819,7 @@
     dom.statusDot.className = "status-dot status-dot--error";
     dom.statusLabel.textContent = "Server status unavailable";
     dom.lastRefresh.textContent = "";
+    renderVersion("");
   }
 
   function showRequestError(error, fallback) {
@@ -1055,6 +1057,13 @@
     const title = safeString(value) || DEFAULT_TITLE;
     dom.pageTitle.textContent = title;
     document.title = title;
+  }
+  function renderVersion(value) {
+    const version = safeString(value);
+    dom.appVersion.hidden = !version;
+    dom.appVersion.textContent = version ? `v${version.replace(/^v/i, "")}` : "";
+    if (version) dom.appVersion.setAttribute("aria-label", `Application version ${version}`);
+    else dom.appVersion.removeAttribute("aria-label");
   }
   function isIsoDate(value) { return /^\d{4}-\d{2}-\d{2}$/.test(value || "") && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)); }
   function normalizeIsoDate(value) { return typeof value === "string" && isIsoDate(value.slice(0, 10)) ? value.slice(0, 10) : null; }

@@ -8,6 +8,19 @@ namespace NltvViewer.App.Forms;
 
 public sealed class MainForm : Form
 {
+    private static readonly Color WindowBackground = Color.FromArgb(18, 22, 28);
+    private static readonly Color PanelBackground = Color.FromArgb(24, 29, 37);
+    private static readonly Color InputBackground = Color.FromArgb(34, 41, 52);
+    private static readonly Color ReadOnlyBackground = Color.FromArgb(27, 33, 42);
+    private static readonly Color BorderColor = Color.FromArgb(67, 78, 94);
+    private static readonly Color PrimaryText = Color.FromArgb(235, 239, 244);
+    private static readonly Color SecondaryText = Color.FromArgb(166, 177, 191);
+    private static readonly Color AccentColor = Color.FromArgb(91, 169, 255);
+    private static readonly Color AccentHoverColor = Color.FromArgb(112, 181, 255);
+    private static readonly Color SelectionColor = Color.FromArgb(34, 93, 153);
+    private static readonly Color SuccessColor = Color.FromArgb(91, 210, 143);
+    private static readonly Color ErrorColor = Color.FromArgb(255, 112, 112);
+
     private readonly ILocalSettingsStore _settingsStore;
     private readonly ISettingsTransferService _settingsTransferService;
     private readonly IStartAtSignInManager _startAtSignInManager;
@@ -23,6 +36,7 @@ public sealed class MainForm : Form
     private readonly CheckBox _startAtSignInCheck = new();
     private readonly DataGridView _showGroupsGrid = new();
     private readonly Label _serverStateLabel = new();
+    private readonly Label _versionLabel = new();
     private readonly LinkLabel _viewerUrlLink = new();
     private readonly TextBox _statusText = new();
     private readonly Button _saveAndApplyButton = new();
@@ -49,15 +63,18 @@ public sealed class MainForm : Form
         _folderAccessProbe = folderAccessProbe;
         _webHost = webHost;
 
-        Text = "NLTV Viewer Settings";
+        Text = $"NLTV Viewer Settings — v{ApplicationVersion.Informational}";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 650);
         Size = new Size(1080, 760);
         AutoScaleMode = AutoScaleMode.Dpi;
+        BackColor = WindowBackground;
+        ForeColor = PrimaryText;
         FormClosing += OnFormClosing;
         _webHost.StatusChanged += OnServerStatusChanged;
 
         Controls.Add(BuildLayout());
+        ApplyDarkTheme(this);
         Populate(settings);
         UpdateServerStatus(_webHost.Status);
         if (!string.IsNullOrWhiteSpace(initialError))
@@ -179,8 +196,15 @@ public sealed class MainForm : Form
         _viewerUrlLink.AutoSize = true;
         _viewerUrlLink.Margin = new Padding(0, 5, 0, 0);
         _viewerUrlLink.LinkClicked += (_, _) => OpenViewer();
+        _versionLabel.AutoSize = true;
+        _versionLabel.Text = $"v{ApplicationVersion.Informational}";
+        _versionLabel.ForeColor = SecondaryText;
+        _versionLabel.Font = new Font(Font.FontFamily, Math.Max(7f, Font.Size - 1f));
+        _versionLabel.Margin = new Padding(12, 6, 0, 0);
+        _versionLabel.AccessibleName = $"Application version {ApplicationVersion.Informational}";
         panel.Controls.Add(_serverStateLabel);
         panel.Controls.Add(_viewerUrlLink);
+        panel.Controls.Add(_versionLabel);
         return panel;
     }
 
@@ -265,7 +289,7 @@ public sealed class MainForm : Form
         {
             Text = "Separate multiple show-name wildcard filters with semicolons. Example: NEWS*; EVENING NEWS?",
             AutoSize = true,
-            ForeColor = SystemColors.GrayText,
+            ForeColor = SecondaryText,
             Padding = new Padding(0, 2, 0, 5),
         };
         panel.Controls.Add(title, 0, 0);
@@ -276,6 +300,39 @@ public sealed class MainForm : Form
         _showGroupsGrid.AllowUserToAddRows = true;
         _showGroupsGrid.AllowUserToDeleteRows = true;
         _showGroupsGrid.RowHeadersVisible = false;
+        _showGroupsGrid.EnableHeadersVisualStyles = false;
+        _showGroupsGrid.BackgroundColor = PanelBackground;
+        _showGroupsGrid.BorderStyle = BorderStyle.FixedSingle;
+        _showGroupsGrid.GridColor = BorderColor;
+        _showGroupsGrid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = InputBackground,
+            ForeColor = PrimaryText,
+            SelectionBackColor = InputBackground,
+            SelectionForeColor = PrimaryText,
+            Font = new Font(Font, FontStyle.Bold),
+        };
+        _showGroupsGrid.DefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = PanelBackground,
+            ForeColor = PrimaryText,
+            SelectionBackColor = SelectionColor,
+            SelectionForeColor = Color.White,
+        };
+        _showGroupsGrid.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Color.FromArgb(28, 34, 43),
+            ForeColor = PrimaryText,
+            SelectionBackColor = SelectionColor,
+            SelectionForeColor = Color.White,
+        };
+        _showGroupsGrid.RowsDefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = PanelBackground,
+            ForeColor = PrimaryText,
+            SelectionBackColor = SelectionColor,
+            SelectionForeColor = Color.White,
+        };
         _showGroupsGrid.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
         _showGroupsGrid.Columns.Add(CreateTextColumn("Id", "ID", 110));
         _showGroupsGrid.Columns.Add(CreateTextColumn("DisplayName", "Display name", 160));
@@ -283,6 +340,11 @@ public sealed class MainForm : Form
         _showGroupsGrid.Columns.Add(CreateTextColumn("SourcePattern", "Viewing source", 130));
         _showGroupsGrid.Columns.Add(CreateTextColumn("StartTime", "Start", 70));
         _showGroupsGrid.Columns.Add(CreateTextColumn("EndTime", "End", 70));
+        _showGroupsGrid.EditingControlShowing += (_, eventArgs) =>
+        {
+            eventArgs.Control.BackColor = InputBackground;
+            eventArgs.Control.ForeColor = PrimaryText;
+        };
         _showGroupsGrid.AccessibleName = "Configured show groups";
         panel.Controls.Add(_showGroupsGrid, 0, 2);
         return panel;
@@ -633,7 +695,7 @@ public sealed class MainForm : Form
         var selectedMetric = SelectedChoiceId(_defaultMetricInput);
         PopulateRatingChoices(status.Capabilities, selectedDemographic, selectedMetric);
         _serverStateLabel.Text = status.IsRunning ? "Server running" : "Server stopped";
-        _serverStateLabel.ForeColor = status.IsRunning ? Color.DarkGreen : Color.DarkRed;
+        _serverStateLabel.ForeColor = status.IsRunning ? SuccessColor : ErrorColor;
         _viewerUrlLink.Text = status.ViewerUrl;
         _viewerUrlLink.Visible = !string.IsNullOrWhiteSpace(status.ViewerUrl);
         _statusText.Text = BuildStatusText(status);
@@ -679,6 +741,82 @@ public sealed class MainForm : Form
         }
 
         return string.Join(Environment.NewLine, lines);
+    }
+
+    private static void ApplyDarkTheme(Control control)
+    {
+        var usesSecondaryText = control.ForeColor == SecondaryText;
+        control.BackColor = control switch
+        {
+            TextBox textBox when textBox.ReadOnly => ReadOnlyBackground,
+            TextBox or ComboBox or NumericUpDown => InputBackground,
+            Panel or DataGridView => PanelBackground,
+            _ => WindowBackground,
+        };
+        control.ForeColor = usesSecondaryText ? SecondaryText : PrimaryText;
+
+        switch (control)
+        {
+            case Button button:
+                button.UseVisualStyleBackColor = false;
+                button.BackColor = InputBackground;
+                button.ForeColor = PrimaryText;
+                button.FlatStyle = FlatStyle.Flat;
+                button.FlatAppearance.BorderColor = BorderColor;
+                button.FlatAppearance.MouseOverBackColor = Color.FromArgb(45, 55, 69);
+                button.FlatAppearance.MouseDownBackColor = SelectionColor;
+                button.EnabledChanged += OnThemedButtonEnabledChanged;
+                break;
+            case LinkLabel link:
+                link.LinkColor = AccentColor;
+                link.ActiveLinkColor = AccentHoverColor;
+                link.VisitedLinkColor = Color.FromArgb(175, 136, 255);
+                break;
+            case TextBox input:
+                input.BackColor = input.ReadOnly ? ReadOnlyBackground : InputBackground;
+                input.ForeColor = PrimaryText;
+                input.BorderStyle = BorderStyle.FixedSingle;
+                break;
+            case ComboBox combo:
+                combo.BackColor = InputBackground;
+                combo.ForeColor = PrimaryText;
+                combo.FlatStyle = FlatStyle.Flat;
+                combo.EnabledChanged += OnThemedInputEnabledChanged;
+                break;
+            case NumericUpDown numeric:
+                numeric.BackColor = InputBackground;
+                numeric.ForeColor = PrimaryText;
+                numeric.BorderStyle = BorderStyle.FixedSingle;
+                numeric.EnabledChanged += OnThemedInputEnabledChanged;
+                break;
+            case DataGridView grid:
+                grid.BackgroundColor = PanelBackground;
+                grid.GridColor = BorderColor;
+                break;
+        }
+
+        foreach (Control child in control.Controls)
+        {
+            ApplyDarkTheme(child);
+        }
+    }
+
+    private static void OnThemedButtonEnabledChanged(object? sender, EventArgs e)
+    {
+        if (sender is Button button)
+        {
+            button.BackColor = button.Enabled ? InputBackground : ReadOnlyBackground;
+            button.ForeColor = button.Enabled ? PrimaryText : SecondaryText;
+        }
+    }
+
+    private static void OnThemedInputEnabledChanged(object? sender, EventArgs e)
+    {
+        if (sender is Control input)
+        {
+            input.BackColor = input.Enabled ? InputBackground : ReadOnlyBackground;
+            input.ForeColor = input.Enabled ? PrimaryText : SecondaryText;
+        }
     }
 
     private async Task RunBusyAsync(Func<Task> action)
