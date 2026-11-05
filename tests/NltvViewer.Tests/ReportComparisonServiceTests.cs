@@ -112,6 +112,8 @@ public sealed class ReportComparisonServiceTests
         Assert.Null(comparisons[0].Delta?.Percentage);
         Assert.Null(comparisons[1].Impressions);
         Assert.Null(comparisons[1].Delta);
+        Assert.Equal(ComparisonTargetState.Available, comparisons[0].State);
+        Assert.Equal(ComparisonTargetState.MissingReport, comparisons[1].State);
     }
 
     [Fact]
@@ -172,6 +174,123 @@ public sealed class ReportComparisonServiceTests
         Assert.Equal(1m, segment.Comparisons[0].Value);
         Assert.Null(segment.Comparisons[0].Impressions);
         Assert.Equal(new MetricDelta(1m, 100m), segment.Comparisons[0].Delta);
+    }
+
+    [Fact]
+    public void BuildUsesOrderedExactComparisonTargetsAcrossDateBoundaries()
+    {
+        var selectedDate = new DateOnly(2026, 1, 1);
+        var previousDay = new DateOnly(2025, 12, 31);
+        var priorMonthEdge = new DateOnly(2025, 11, 30);
+        var selected = Report(
+            selectedDate,
+            Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 100m));
+        var dayReport = Report(
+            previousDay,
+            Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 80m));
+        var monthReport = Report(
+            priorMonthEdge,
+            Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 50m));
+        var targets = new[]
+        {
+            new ComparisonTarget("previous-day", "Previous day", previousDay),
+            new ComparisonTarget("custom-month-edge", "Month-end comparison", priorMonthEdge)
+        };
+        var group = new ShowGroupSettings { Id = "news", Aliases = ["ALPHA NEWS*"] };
+
+        var result = _service.Build(
+            selected,
+            new Dictionary<DateOnly, RatingReport>
+            {
+                [previousDay] = dayReport,
+                [priorMonthEdge] = monthReport
+            },
+            [group],
+            comparisonTargets: targets);
+
+        Assert.Equal(targets, result.Targets);
+        var comparisons = Assert.Single(Assert.Single(result.Shows).Segments).Comparisons;
+        Assert.Collection(
+            comparisons,
+            comparison =>
+            {
+                Assert.Equal("previous-day", comparison.Target.Id);
+                Assert.Equal("Previous day", comparison.Target.Label);
+                Assert.Equal(previousDay, comparison.TargetDate);
+                Assert.Equal(20m, comparison.Delta?.Absolute);
+                Assert.Equal(ComparisonTargetState.Available, comparison.State);
+            },
+            comparison =>
+            {
+                Assert.Equal("custom-month-edge", comparison.Target.Id);
+                Assert.Equal(priorMonthEdge, comparison.TargetDate);
+                Assert.Equal(50m, comparison.Delta?.Absolute);
+            });
+    }
+
+    [Fact]
+    public void BuildRepresentsMissingExactTargetAsMissingNeverZero()
+    {
+        var selectedDate = new DateOnly(2025, 3, 31);
+        var selected = Report(
+            selectedDate,
+            Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 100m));
+        var target = new ComparisonTarget(
+            "last-month",
+            "Previous month",
+            new DateOnly(2025, 2, 28));
+        var group = new ShowGroupSettings { Id = "news", Aliases = ["ALPHA NEWS*"] };
+
+        var result = _service.Build(
+            selected,
+            new Dictionary<DateOnly, RatingReport>(),
+            [group],
+            comparisonTargets: [target]);
+
+        var comparison = Assert.Single(Assert.Single(Assert.Single(result.Shows).Segments).Comparisons);
+        Assert.Equal(ComparisonTargetState.MissingReport, comparison.State);
+        Assert.Null(comparison.Value);
+        Assert.Null(comparison.Impressions);
+        Assert.Null(comparison.Delta);
+    }
+
+    [Fact]
+    public void BuildUsesLegacyTargetsWhenCustomTargetsAreOmitted()
+    {
+        var selectedDate = new DateOnly(2024, 2, 29);
+        var selected = Report(
+            selectedDate,
+            Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 100m));
+        var group = new ShowGroupSettings { Id = "news", Aliases = ["ALPHA NEWS*"] };
+
+        var result = _service.Build(
+            selected,
+            new Dictionary<DateOnly, RatingReport>(),
+            [group]);
+
+        Assert.Equal(
+            [selectedDate.AddDays(-7), selectedDate.AddDays(-14), selectedDate.AddDays(-364)],
+            result.Targets.Select(target => target.TargetDate));
+        Assert.Equal(["last-week", "two-weeks-ago", "last-year"], result.Targets.Select(target => target.Id));
+    }
+
+    [Fact]
+    public void BuildRejectsDuplicateExactTargetIds()
+    {
+        var selected = Report(
+            new DateOnly(2026, 1, 1),
+            Segment("ALPHA 1.1", "ALPHA NEWS", "6:00pm - 6:15pm", 1080, 0, 100m));
+        var group = new ShowGroupSettings { Id = "news", Aliases = ["ALPHA NEWS*"] };
+
+        Assert.Throws<ArgumentException>(() => _service.Build(
+            selected,
+            new Dictionary<DateOnly, RatingReport>(),
+            [group],
+            comparisonTargets:
+            [
+                new("same", "First", new DateOnly(2025, 12, 31)),
+                new("SAME", "Second", new DateOnly(2025, 12, 1))
+            ]));
     }
 
     [Theory]

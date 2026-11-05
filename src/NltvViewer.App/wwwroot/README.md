@@ -21,16 +21,18 @@ Dates are ISO `yyyy-MM-dd`. The UI defaults to `latestAvailableDate`; previous a
 
 Returns the same `capabilities` object shown in the ratings example below. The UI can also obtain this object from `capabilities` on the days or status response, allowing one fewer startup request.
 
-### `GET api/v1/ratings?date=2026-09-10&demographic=p18-plus&metric=imp`
+### `GET api/v1/ratings?date=2026-09-10&demographic=p18-plus&metric=imp&compare=previous-day&compare=last-month&compare=date:2026-08-20`
+
+`compare` is an optional ordered, repeated parameter with a maximum of four values. Supported presets are `previous-day`, `last-week`, `two-weeks-ago`, `last-month`, and `last-year`; `date:YYYY-MM-DD` targets an exact date. Omitting the parameter uses `last-week`, `two-weeks-ago`, and `last-year`. Duplicate specs, more than four values, invalid values, or multiple specs that resolve to the same date return `400` with `errorCode: "invalid_comparison_request"`.
 
 ```json
 {
   "selectedDate": "2026-09-10",
-  "comparisonDates": {
-    "previousWeek": "2026-09-03",
-    "twoWeeksAgo": "2026-08-27",
-    "previousYear": "2025-09-11"
-  },
+  "comparisonDescriptors": [
+    { "id": "previous-day", "label": "Previous day", "targetDate": "2026-09-09", "spec": "previous-day", "available": true },
+    { "id": "last-month", "label": "Last month", "targetDate": "2026-08-10", "spec": "last-month", "available": false },
+    { "id": "date-2026-08-20", "label": "Specific date (2026-08-20)", "targetDate": "2026-08-20", "spec": "date:2026-08-20", "available": true }
+  ],
   "generatedAtUtc": "2026-09-11T18:30:00Z",
   "displayTitle": "News Ratings",
   "capabilities": {
@@ -68,9 +70,11 @@ Returns the same `capabilities` object shown in the ratings example below. The U
           "label": "6:00 PM",
           "time": "18:00",
           "selected": { "value": 26480, "actualTime": "6:01 PM" },
-          "previousWeek": 24120,
-          "twoWeeksAgo": 25200,
-          "previousYear": { "value": 23310, "rawTitle": "LOCAL NEWS 6PM" },
+          "comparisons": [
+            { "period": "previous-day", "targetDate": "2026-09-09", "state": "Available", "value": 24120 },
+            { "period": "last-month", "targetDate": "2026-08-10", "state": "MissingReport", "value": null },
+            { "period": "date-2026-08-20", "targetDate": "2026-08-20", "state": "Available", "value": 23310, "actualProgramName": "LOCAL NEWS 6PM" }
+          ],
           "isShifted": true,
           "isPreempted": false
         }
@@ -82,7 +86,7 @@ Returns the same `capabilities` object shown in the ratings example below. The U
 
 Each series value can be either a JSON number or an object. A value object supports `value`, `delta`, `percentDelta`, `actualTime`, `rawTitle`, and `missingReason`. The browser computes the displayed change as selected minus comparison so results remain consistent. A missing value should be `null` or `{ "value": null, "missingReason": "..." }`.
 
-The UI sends the selected capability IDs as `demographic` and `metric`. It filters the measure dropdown through `availableSelections`, remembers the last valid measure for each audience in local browser storage, and falls back visibly when a selection is not offered for another report date. Capability metadata may alternatively be included on the days or status response. Metrics may also be nested on each demographic or supplied through `metricsByDemographic`.
+The UI sends the selected capability IDs as `demographic` and `metric`, plus the selected ordered comparison specs. It remembers comparison choices and the last valid measure for each audience in local browser storage, and falls back visibly when a selection is not offered for another report date. Capability metadata may alternatively be included on the days or status response. Metrics may also be nested on each demographic or supplied through `metricsByDemographic`.
 
 Compatibility aliases accepted by the UI include `priorWeek`/`d7`, `twoWeeksPrior`/`d14`, `priorYear`/`d364`, and `quarterHours` in place of `segments`.
 It also accepts the Core comparison model directly: show fields `displayName`, `viewingSource`, and `programName`; segment fields `current` and `comparisons`; and comparison period IDs `last-week`, `two-weeks-ago`, and `last-year`.
@@ -92,11 +96,12 @@ It also accepts the Core comparison model directly: show fields `displayName`, `
 ```json
 {
   "lastRefreshUtc": "2026-09-11T18:30:00Z",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "displayTitle": "News Ratings",
   "isStale": false,
   "sourceAvailable": true,
   "sourceDisplayName": "Configured ratings share",
+  "defaultComparisons": ["last-week", "two-weeks-ago", "last-year"],
   "errorCode": null,
   "message": null
 }

@@ -1,4 +1,5 @@
 using NltvViewer.App.Configuration;
+using NltvViewer.App.Comparisons;
 using NltvViewer.Core.Comparisons;
 using NltvViewer.Core.Configuration;
 using NltvViewer.Core.Reports;
@@ -33,6 +34,7 @@ public interface IViewerDataGateway : IDisposable
         DateOnly reportDate,
         string? demographicId,
         string? metricId,
+        IReadOnlyList<ResolvedComparisonSpec> comparisons,
         CancellationToken cancellationToken);
 }
 
@@ -177,9 +179,11 @@ public sealed class ViewerDataGateway : IViewerDataGateway
         DateOnly reportDate,
         string? demographicId,
         string? metricId,
+        IReadOnlyList<ResolvedComparisonSpec> comparisons,
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(comparisons);
         var snapshot = CaptureCurrent();
         var selected = await snapshot.Catalog
             .GetAsync(reportDate, cancellationToken)
@@ -190,15 +194,16 @@ public sealed class ViewerDataGateway : IViewerDataGateway
         }
 
         var comparisonReports = new Dictionary<DateOnly, RatingReport>();
-        foreach (var daysBack in ReportComparisonService.Periods.Select(period => period.DaysBack))
+        foreach (var targetDate in comparisons
+                     .Select(item => item.Target.TargetDate)
+                     .Distinct())
         {
-            var comparisonDate = reportDate.AddDays(-daysBack);
             var lookup = await snapshot.Catalog
-                .GetAsync(comparisonDate, cancellationToken)
+                .GetAsync(targetDate, cancellationToken)
                 .ConfigureAwait(false);
             if (lookup.Report is not null)
             {
-                comparisonReports[comparisonDate] = lookup.Report;
+                comparisonReports[targetDate] = lookup.Report;
             }
         }
 
@@ -214,7 +219,8 @@ public sealed class ViewerDataGateway : IViewerDataGateway
                 selected.Report!,
                 comparisonReports,
                 snapshot.ShowGroups,
-                selection);
+                selection,
+                comparisons.Select(item => item.Target).ToArray());
         }
         catch (ArgumentException exception)
         {
@@ -273,6 +279,8 @@ public sealed class ViewerDataGateway : IViewerDataGateway
                     {
                         period.Period,
                         period.TargetDate,
+                        period.Target,
+                        period.State,
                         period.ActualTimeLabel,
                         period.ActualProgramName,
                         impressions = legacySelection ? period.Impressions : null,
@@ -283,6 +291,14 @@ public sealed class ViewerDataGateway : IViewerDataGateway
             }).ToArray(),
             comparison.Capabilities,
             comparison.Selection,
+            comparisonDescriptors = comparisons.Select(item => new
+            {
+                item.Target.Id,
+                item.Target.Label,
+                item.Target.TargetDate,
+                item.Spec,
+                available = comparisonReports.ContainsKey(item.Target.TargetDate),
+            }).ToArray(),
             demographic = comparison.Selection.DemographicId,
             metric = comparison.Selection.MetricId,
             isStale = status.IsStale,

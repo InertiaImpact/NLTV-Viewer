@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using NltvViewer.App.Comparisons;
 using NltvViewer.Core.Configuration;
 
 namespace NltvViewer.App.Configuration;
@@ -23,6 +24,9 @@ public sealed class LocalApplicationSettings
     public string DefaultDemographicId { get; set; } = string.Empty;
 
     public string DefaultMetricId { get; set; } = string.Empty;
+
+    public List<string> DefaultComparisonSpecs { get; set; } =
+        [.. ComparisonRequestParser.LegacyDefaults];
 
     public bool StartAtSignIn { get; set; }
 
@@ -109,6 +113,15 @@ public static class LocalApplicationSettingsValidator
             != string.IsNullOrWhiteSpace(settings.DefaultMetricId))
         {
             errors.Add("Preferred demographic and metric must both be Auto, or both be selected.");
+        }
+
+        try
+        {
+            _ = ComparisonRequestParser.NormalizeAndValidate(settings.DefaultComparisonSpecs);
+        }
+        catch (ComparisonRequestException exception)
+        {
+            errors.Add($"Default comparisons: {exception.Message}");
         }
 
         ValidatePathBase(settings.PathBase, errors);

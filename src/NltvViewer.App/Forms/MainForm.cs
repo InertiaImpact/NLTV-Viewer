@@ -33,6 +33,7 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _pollingIntervalInput = new();
     private readonly ComboBox _defaultDemographicInput = new();
     private readonly ComboBox _defaultMetricInput = new();
+    private readonly TextBox _defaultComparisonsText = new();
     private readonly CheckBox _startAtSignInCheck = new();
     private readonly DataGridView _showGroupsGrid = new();
     private readonly Label _serverStateLabel = new();
@@ -259,9 +260,24 @@ public sealed class MainForm : Form
             "Preferred metric",
             _defaultMetricInput);
 
+        _defaultComparisonsText.Dock = DockStyle.Fill;
+        _defaultComparisonsText.PlaceholderText = "last-week; two-weeks-ago; last-year";
+        var comparisonsHelp = new Label
+        {
+            Text = "Up to 4: previous-day, last-week, two-weeks-ago, last-month, last-year, or date:YYYY-MM-DD",
+            AutoSize = true,
+            ForeColor = SystemColors.GrayText,
+            Margin = new Padding(3, 1, 0, 4),
+        };
+        panel.Controls.Add(CreateLabel("Default comparisons"), 0, 4);
+        panel.Controls.Add(_defaultComparisonsText, 1, 4);
+        panel.SetColumnSpan(_defaultComparisonsText, 3);
+        panel.Controls.Add(comparisonsHelp, 1, 5);
+        panel.SetColumnSpan(comparisonsHelp, 3);
+
         _startAtSignInCheck.Text = "Start at Windows sign-in";
         _startAtSignInCheck.AutoSize = true;
-        panel.Controls.Add(_startAtSignInCheck, 1, 4);
+        panel.Controls.Add(_startAtSignInCheck, 1, 6);
         panel.SetColumnSpan(_startAtSignInCheck, 3);
         return panel;
     }
@@ -441,6 +457,9 @@ public sealed class MainForm : Form
             _ratingCapabilities,
             settings.DefaultDemographicId,
             settings.DefaultMetricId);
+        _defaultComparisonsText.Text = string.Join(
+            "; ",
+            settings.DefaultComparisonSpecs ?? []);
         _startAtSignInCheck.Checked = settings.StartAtSignIn;
         _showGroupsGrid.Rows.Clear();
         foreach (var group in settings.ShowGroups)
@@ -485,6 +504,9 @@ public sealed class MainForm : Form
             PollingIntervalMinutes = Decimal.ToInt32(_pollingIntervalInput.Value),
             DefaultDemographicId = SelectedChoiceId(_defaultDemographicInput),
             DefaultMetricId = SelectedChoiceId(_defaultMetricInput),
+            DefaultComparisonSpecs = _defaultComparisonsText.Text
+                .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .ToList(),
             StartAtSignIn = _startAtSignInCheck.Checked,
             ShowGroups = groups,
         };

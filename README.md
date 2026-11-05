@@ -6,13 +6,16 @@ The repository contains no production report path, station name, show name, cred
 
 ## What it shows
 
-For each configured logical show, the dashboard plots the selected demographic and metric for the chosen broadcast day and compares the same segment position with:
+For each configured logical show, the dashboard plots the selected demographic and metric for the chosen broadcast day and compares the same segment position with up to four ordered comparison dates. Producers can choose:
 
-- 7 days earlier
-- 14 days earlier
-- 364 days earlier (the same weekday 52 weeks earlier)
+- previous day
+- last week
+- two weeks ago
+- last month
+- last year (the same weekday 52 weeks earlier)
+- an exact calendar date
 
-Each quarter-hour also shows the absolute and percentage change. Missing data is distinct from a measured zero. A comparison against a zero baseline has no percentage value.
+The default comparisons are last week, two weeks ago, and last year, preserving the original view. The web controls remember a producer's choices in that browser. Each quarter-hour also shows the absolute and percentage change. Missing comparison reports or values are visibly unavailable and remain distinct from a measured zero. A comparison against a zero baseline has no percentage value.
 
 Audience and measure choices are discovered from each report instead of being compiled into the program. Current reports may, for example, offer HH, P25-54, M25-54, F25-54, P18-49, and P18+ across RTG, SHR, IMP, and HUT/PUT. The web toolbar only offers combinations actually present in the selected report, remembers the producer's last choice in that browser, and safely falls back when a date has different capabilities. The desktop app can optionally set a preferred initial pair; **Auto** uses the report's preferred pair (P18+/IMP when present, otherwise the first valid pair).
 
@@ -36,9 +39,10 @@ On first run, configure:
 1. The report folder. A UNC path is more reliable than a mapped drive for unattended startup.
 2. The listening port and optional nginx path base, such as `/ratings`.
 3. An optional preferred demographic and metric after the first report scan. Leave both at **Auto** for report-driven defaults.
-4. One row per logical show. Separate aliases with semicolons. `*` matches any text and `?` matches one character.
-5. Optional source and start/end time constraints.
-6. Whether the app starts at Windows sign-in.
+4. Up to four semicolon-separated default comparisons. Use `previous-day`, `last-week`, `two-weeks-ago`, `last-month`, `last-year`, or `date:YYYY-MM-DD`.
+5. One row per logical show. Separate aliases with semicolons. `*` matches any text and `?` matches one character.
+6. Optional source and start/end time constraints.
+7. Whether the app starts at Windows sign-in.
 
 Use **Test folder**, then **Save & apply**. Closing the settings window leaves the server in the notification area. Use the tray menu to reopen settings, refresh reports, open the viewer, or exit.
 
@@ -87,7 +91,7 @@ All assets and API requests are path-base relative. The public surface is read-o
 - `GET /ratings/`
 - `GET /ratings/api/v1/days`
 - `GET /ratings/api/v1/capabilities`
-- `GET /ratings/api/v1/ratings?date=YYYY-MM-DD&demographic=p18-plus&metric=imp`
+- `GET /ratings/api/v1/ratings?date=YYYY-MM-DD&demographic=p18-plus&metric=imp&compare=last-week&compare=date:YYYY-MM-DD`
 - `GET /ratings/api/v1/status`
 - `GET /ratings/health/live`
 - `GET /ratings/health/ready`
@@ -95,6 +99,8 @@ All assets and API requests are path-base relative. The public surface is read-o
 nginx should own TLS and access control. If nginx runs on another computer, configure a specific LAN bind address and firewall rule; do not expose Kestrel directly to an untrusted network.
 
 Both `demographic` and `metric` are optional together; omitting both uses the configured/report default. Supplying only one or an invalid pair returns a structured client error with the available capabilities. The parameterless behavior remains compatible with earlier P18+/IMP clients.
+
+The optional `compare` parameter may be repeated in display order, up to four times. Supported values match the desktop defaults above. Omitting every `compare` parameter uses the legacy last-week, two-weeks-ago, and last-year set. Invalid, duplicate, excessive, or same-target comparisons return `400 invalid_comparison_request`.
 
 ## Startup model
 

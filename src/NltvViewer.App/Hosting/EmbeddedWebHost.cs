@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using Microsoft.AspNetCore.HttpOverrides;
+using NltvViewer.App.Comparisons;
 using NltvViewer.App.Configuration;
 using NltvViewer.Core.Reports;
 
@@ -332,6 +333,8 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                 message = status.Message,
                 hasUsableReports = dataStatus.HasUsableReports,
                 capabilities = dataStatus.Capabilities,
+                defaultComparisons = ComparisonRequestParser
+                    .NormalizeAndValidate(settings.DefaultComparisonSpecs),
                 running = status.IsRunning,
                 refreshing = status.IsRefreshing,
                 viewerUrl = status.ViewerUrl,
@@ -366,6 +369,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
             string? date,
             string? demographic,
             string? metric,
+            string[]? compare,
             CancellationToken cancellationToken) =>
         {
             if (!DateOnly.TryParseExact(
@@ -376,6 +380,21 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
                 out var parsedDate))
             {
                 return Results.BadRequest(new { error = "date must use YYYY-MM-DD format" });
+            }
+
+            IReadOnlyList<ResolvedComparisonSpec> comparisons;
+            try
+            {
+                comparisons = ComparisonRequestParser.Resolve(parsedDate, compare);
+            }
+            catch (ComparisonRequestException exception)
+            {
+                return Results.BadRequest(new
+                {
+                    errorCode = "invalid_comparison_request",
+                    message = exception.Message,
+                    maximumComparisons = ComparisonRequestParser.MaximumComparisons,
+                });
             }
 
             var dataStatus = _dataGateway.Status;
@@ -395,7 +414,7 @@ public sealed class EmbeddedWebHost : IEmbeddedWebHost
             try
             {
                 var result = await _dataGateway
-                    .GetRatingsAsync(parsedDate, demographic, metric, cancellationToken)
+                    .GetRatingsAsync(parsedDate, demographic, metric, comparisons, cancellationToken)
                     .ConfigureAwait(false);
                 return result is null
                     ? Results.NotFound(new { error = $"No ratings are available for {date}." })

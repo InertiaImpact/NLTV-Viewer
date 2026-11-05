@@ -10,7 +10,8 @@ public interface IReportComparisonService
         RatingReport selected,
         IReadOnlyDictionary<DateOnly, RatingReport> comparisonReports,
         IReadOnlyList<ShowGroupSettings> showGroups,
-        RatingSelection? selection = null);
+        RatingSelection? selection = null,
+        IReadOnlyList<ComparisonTarget>? comparisonTargets = null);
 }
 
 public sealed class ReportComparisonService : IReportComparisonService
@@ -22,21 +23,30 @@ public sealed class ReportComparisonService : IReportComparisonService
         new("last-year", "Same weekday last year", 364)
     ];
 
+    public static IReadOnlyList<ComparisonTarget> CreateDefaultTargets(DateOnly selectedDate) =>
+        Periods.Select(period => new ComparisonTarget(
+            period.Id,
+            period.Label,
+            selectedDate.AddDays(-period.DaysBack))).ToArray();
+
     public ComparisonView Build(
         RatingReport selected,
         IReadOnlyDictionary<DateOnly, RatingReport> comparisonReports,
         IReadOnlyList<ShowGroupSettings> showGroups,
-        RatingSelection? selection = null)
+        RatingSelection? selection = null,
+        IReadOnlyList<ComparisonTarget>? comparisonTargets = null)
     {
         ArgumentNullException.ThrowIfNull(selected);
         ArgumentNullException.ThrowIfNull(comparisonReports);
         ArgumentNullException.ThrowIfNull(showGroups);
         var capabilities = selected.EffectiveCapabilities;
         var resolvedSelection = capabilities.Resolve(selection);
+        var targets = ResolveTargets(selected.ReportDate, comparisonTargets);
 
-        var reportMap = Periods.ToDictionary(
-            period => period.Id,
-            period => comparisonReports.GetValueOrDefault(selected.ReportDate.AddDays(-period.DaysBack)));
+        var reportMap = targets.ToDictionary(
+            target => target.Id,
+            target => comparisonReports.GetValueOrDefault(target.TargetDate),
+            StringComparer.OrdinalIgnoreCase);
 
         var output = new List<ShowComparison>();
         foreach (var group in showGroups)
@@ -86,27 +96,41 @@ public sealed class ReportComparisonService : IReportComparisonService
                         current,
                         resolvedSelection.DemographicId,
                         resolvedSelection.MetricId);
-                    var values = Periods.Select(period =>
+                    var values = targets.Select(target =>
                     {
-                        var targetDate = selected.ReportDate.AddDays(-period.DaysBack);
-                        var referenceReport = reportMap[period.Id];
-                        var reference = referenceRuns[period.Id]?.Segments.ElementAtOrDefault(index);
+                        var referenceReport = reportMap[target.Id];
+                        var referenceRun = referenceRuns[target.Id];
+                        var reference = referenceRun?.Segments.ElementAtOrDefault(index);
                         var referenceValue = reference is null || referenceReport is null
                             ? null
                             : referenceReport.GetValue(
                                 reference,
                                 resolvedSelection.DemographicId,
                                 resolvedSelection.MetricId);
+                        var state = referenceReport is null
+                            ? ComparisonTargetState.MissingReport
+                            : referenceRun is null
+                                ? ComparisonTargetState.MissingShow
+                                : reference is null
+                                    ? ComparisonTargetState.MissingSegment
+                                    : referenceValue is null
+                                        ? ComparisonTargetState.MissingValue
+                                        : ComparisonTargetState.Available;
                         return new PeriodComparison(
-                            period,
-                            targetDate,
+                            new ComparisonPeriod(
+                                target.Id,
+                                target.Label,
+                                selected.ReportDate.DayNumber - target.TargetDate.DayNumber),
+                            target.TargetDate,
                             reference?.TimeLabel,
                             reference?.ProgramName,
                             string.Equals(resolvedSelection.MetricId, "imp", StringComparison.OrdinalIgnoreCase)
                                 ? referenceValue
                                 : null,
                             CalculateDelta(currentValue, referenceValue),
-                            referenceValue);
+                            referenceValue,
+                            target,
+                            state);
                     }).ToArray();
 
                     segmentResults.Add(new SegmentComparison(index + 1, current, values, currentValue));
@@ -127,7 +151,8 @@ public sealed class ReportComparisonService : IReportComparisonService
             selected.SourceLastModifiedUtc,
             output,
             capabilities,
-            resolvedSelection);
+            resolvedSelection,
+            targets);
     }
 
     public static MetricDelta? CalculateDelta(decimal? current, decimal? reference)
@@ -142,6 +167,39 @@ public sealed class ReportComparisonService : IReportComparisonService
             ? null
             : decimal.Round(absolute / reference.Value * 100m, 1, MidpointRounding.AwayFromZero);
         return new MetricDelta(absolute, percentage);
+    }
+
+    private static IReadOnlyList<ComparisonTarget> ResolveTargets(
+        DateOnly selectedDate,
+        IReadOnlyList<ComparisonTarget>? requested)
+    {
+        if (requested is null || requested.Count == 0)
+        {
+            return CreateDefaultTargets(selectedDate);
+        }
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var target in requested)
+        {
+            if (string.IsNullOrWhiteSpace(target.Id))
+            {
+                throw new ArgumentException("Comparison target ids cannot be empty.", nameof(requested));
+            }
+
+            if (string.IsNullOrWhiteSpace(target.Label))
+            {
+                throw new ArgumentException("Comparison target labels cannot be empty.", nameof(requested));
+            }
+
+            if (!ids.Add(target.Id))
+            {
+                throw new ArgumentException(
+                    $"Comparison target id '{target.Id}' is duplicated.",
+                    nameof(requested));
+            }
+        }
+
+        return requested.ToArray();
     }
 
     private static bool IsUsable(ShowGroupSettings group) =>
@@ -219,12 +277,15 @@ public sealed class ReportComparisonService : IReportComparisonService
 
 public sealed record ComparisonPeriod(string Id, string Label, int DaysBack);
 
+public sealed record ComparisonTarget(string Id, string Label, DateOnly TargetDate);
+
 public sealed record ComparisonView(
     DateOnly SelectedDate,
     DateTimeOffset SourceLastModifiedUtc,
     IReadOnlyList<ShowComparison> Shows,
     RatingCapabilities Capabilities,
-    RatingSelection Selection);
+    RatingSelection Selection,
+    IReadOnlyList<ComparisonTarget> Targets);
 
 public sealed record ShowComparison(
     string GroupId,
@@ -255,6 +316,17 @@ public sealed record PeriodComparison(
     string? ActualProgramName,
     decimal? Impressions,
     MetricDelta? Delta,
-    decimal? Value);
+    decimal? Value,
+    ComparisonTarget Target,
+    ComparisonTargetState State);
+
+public enum ComparisonTargetState
+{
+    Available,
+    MissingReport,
+    MissingShow,
+    MissingSegment,
+    MissingValue
+}
 
 public sealed record MetricDelta(decimal Absolute, decimal? Percentage);

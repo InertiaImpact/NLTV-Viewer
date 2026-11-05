@@ -64,6 +64,22 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
           </button>
         </div>
+        <details id="comparison-panel" class="comparison-settings">
+          <summary>
+            <span>Compare</span>
+            <span id="comparison-summary" class="comparison-summary">Last week, two weeks ago, last year</span>
+          </summary>
+          <div class="comparison-popover">
+            <div class="comparison-popover__heading">
+              <strong>Comparison periods</strong>
+              <span>Up to four</span>
+            </div>
+            <div id="comparison-slots" class="comparison-slots"></div>
+            <button id="add-comparison" class="add-comparison" type="button">+ Add comparison</button>
+            <p id="comparison-help" class="comparison-help">Choosing a date automatically switches that row to Specific date.</p>
+            <p id="comparison-status" class="sr-only" aria-live="polite"></p>
+          </div>
+        </details>
       </div>
       <p id="selector-status" class="sr-only" aria-live="polite"></p>
     </section>

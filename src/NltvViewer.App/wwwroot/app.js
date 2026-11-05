@@ -7,11 +7,16 @@
     status: "./api/v1/status"
   });
 
-  const SERIES = Object.freeze([
-    { key: "selected", label: "Selected", seriesClass: "series-selected", className: "" },
-    { key: "previousWeek", label: "Prior week", seriesClass: "series-previous-week", className: "chart-line--secondary" },
-    { key: "twoWeeksAgo", label: "Two weeks prior", seriesClass: "series-two-weeks-ago", className: "chart-line--secondary chart-line--dashed", dashed: true },
-    { key: "previousYear", label: "Prior year", seriesClass: "series-previous-year", className: "chart-line--secondary chart-line--dashed", dashed: true }
+  const SELECTED_SERIES = Object.freeze({ key: "selected", label: "Selected", seriesClass: "series-selected", className: "" });
+  const MAX_COMPARISONS = 4;
+  const LEGACY_COMPARISONS = Object.freeze(["last-week", "two-weeks-ago", "last-year"]);
+  const COMPARISON_PRESETS = Object.freeze([
+    { id: "previous-day", label: "Previous day" },
+    { id: "last-week", label: "Last week" },
+    { id: "two-weeks-ago", label: "Two weeks ago" },
+    { id: "last-month", label: "Last month" },
+    { id: "last-year", label: "Last year" },
+    { id: "specific-date", label: "Specific date" }
   ]);
 
   const SVG_NS = "http://www.w3.org/2000/svg";
@@ -31,6 +36,9 @@
     demographicId: DEFAULT_DEMOGRAPHIC.id,
     metricId: DEFAULT_METRIC.id,
     metricByDemographic: Object.create(null),
+    comparisonSlots: LEGACY_COMPARISONS.map(spec => ({ preset: spec, date: "" })),
+    comparisonExplicit: false,
+    comparisonConfigured: false,
     capabilityNotice: "",
     capabilities: {
       demographics: [DEFAULT_DEMOGRAPHIC],
@@ -67,7 +75,12 @@
       measureSummary: document.querySelector("#measure-summary"),
       demographic: document.querySelector("#demographic-select"),
       metric: document.querySelector("#metric-select"),
-      selectorStatus: document.querySelector("#selector-status")
+      selectorStatus: document.querySelector("#selector-status"),
+      comparisonPanel: document.querySelector("#comparison-panel"),
+      comparisonSummary: document.querySelector("#comparison-summary"),
+      comparisonSlots: document.querySelector("#comparison-slots"),
+      addComparison: document.querySelector("#add-comparison"),
+      comparisonStatus: document.querySelector("#comparison-status")
     });
 
     restoreSelection();
@@ -79,9 +92,11 @@
     dom.next.addEventListener("click", () => moveAvailableDay(1));
     dom.demographic.addEventListener("change", () => changeSelection("demographic", dom.demographic.value));
     dom.metric.addEventListener("change", () => changeSelection("metric", dom.metric.value));
+    dom.addComparison.addEventListener("click", addComparisonSlot);
     dom.tryAgain.addEventListener("click", () => state.selectedDate ? loadRatings(state.selectedDate) : bootstrap());
 
     renderSelectors();
+    renderComparisonControls();
     bootstrap();
   }
 
@@ -94,6 +109,11 @@
 
     if (statusResult.status === "fulfilled") {
       state.status = normalizeStatus(statusResult.value);
+      if (!state.comparisonExplicit && state.status.defaultComparisons.length) {
+        state.comparisonSlots = state.status.defaultComparisons.map(specToSlot);
+        state.comparisonConfigured = true;
+        renderComparisonControls();
+      }
       renderStatus();
     } else {
       renderStatusError();
@@ -137,12 +157,16 @@
       const parameters = new URLSearchParams({ date });
       if (state.demographicId) parameters.set("demographic", state.demographicId);
       if (state.metricId) parameters.set("metric", state.metricId);
+      if (state.comparisonExplicit || state.comparisonConfigured) {
+        for (const spec of comparisonSpecs()) parameters.append("compare", spec);
+      }
       const url = `${API.ratings}?${parameters}`;
       const raw = await fetchJson(url);
       if (requestId !== state.requestId) return;
       updateCapabilities(raw);
       applyResponseSelections(raw);
       state.data = normalizeRatings(raw, date);
+      if (!state.comparisonExplicit) syncComparisonSlots(state.data.comparisonDescriptors);
       renderSelectors();
       renderRatings();
     } catch (error) {
@@ -199,7 +223,8 @@
       message: safeString(raw?.message || raw?.detail),
       errorCode: safeString(raw?.errorCode || raw?.code),
       displayTitle: safeString(raw?.displayTitle || raw?.siteTitle),
-      version: safeString(raw?.version || raw?.appVersion || raw?.applicationVersion || raw?.serverVersion || raw?.informationalVersion)
+      version: safeString(raw?.version || raw?.appVersion || raw?.applicationVersion || raw?.serverVersion || raw?.informationalVersion),
+      defaultComparisons: normalizeComparisonSpecList(raw?.defaultComparisons || raw?.comparisons || raw?.comparisonDefaults)
     };
   }
 
@@ -434,6 +459,150 @@
     if (state.selectedDate) loadRatings(state.selectedDate);
   }
 
+  function renderComparisonControls() {
+    dom.comparisonSlots.replaceChildren();
+    state.comparisonSlots.forEach((slot, index) => {
+      const fieldset = element("fieldset", "comparison-slot");
+      fieldset.append(element("legend", "sr-only", `Comparison ${index + 1}`));
+
+      const periodLabel = element("label", "comparison-slot__period");
+      periodLabel.append(element("span", "comparison-slot__label", `Period ${index + 1}`));
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", `Comparison ${index + 1} period`);
+      for (const preset of COMPARISON_PRESETS) {
+        const option = document.createElement("option");
+        option.value = preset.id;
+        option.textContent = preset.label;
+        select.append(option);
+      }
+      select.value = slot.preset;
+      select.disabled = state.isLoading;
+      select.addEventListener("change", () => {
+        slot.preset = select.value;
+        if (slot.preset !== "specific-date") slot.date = "";
+        state.comparisonExplicit = true;
+        renderComparisonControls();
+        if (slot.preset === "specific-date") {
+          dom.comparisonSlots.querySelector(`[data-comparison-date="${index}"]`)?.focus();
+        } else {
+          applyComparisonChange(`Comparison ${index + 1} changed to ${comparisonSpecLabel(slot.preset)}.`);
+        }
+      });
+      periodLabel.append(select);
+      fieldset.append(periodLabel);
+
+      const dateLabel = element("label", "comparison-slot__date");
+      dateLabel.append(element("span", "comparison-slot__label", "Date"));
+      const date = document.createElement("input");
+      date.type = "date";
+      date.value = slot.date;
+      date.dataset.comparisonDate = String(index);
+      date.setAttribute("aria-label", `Comparison ${index + 1} date; choosing a date selects Specific date`);
+      date.setAttribute("aria-describedby", "comparison-help");
+      date.disabled = state.isLoading;
+      date.addEventListener("change", () => {
+        slot.date = date.value;
+        if (isIsoDate(slot.date)) {
+          slot.preset = "specific-date";
+          state.comparisonExplicit = true;
+          applyComparisonChange(`Comparison ${index + 1} changed to ${formatDate(slot.date)}.`);
+        } else {
+          dom.comparisonStatus.textContent = `Choose a valid date for comparison ${index + 1}.`;
+        }
+      });
+      dateLabel.append(date);
+      fieldset.append(dateLabel);
+
+      const remove = element("button", "comparison-slot__remove", "Remove");
+      remove.type = "button";
+      remove.setAttribute("aria-label", `Remove comparison ${index + 1}`);
+      remove.disabled = state.isLoading || state.comparisonSlots.length <= 1;
+      remove.addEventListener("click", () => {
+        state.comparisonSlots.splice(index, 1);
+        state.comparisonExplicit = true;
+        applyComparisonChange(`Comparison ${index + 1} removed.`);
+      });
+      fieldset.append(remove);
+      dom.comparisonSlots.append(fieldset);
+    });
+
+    dom.addComparison.disabled = state.isLoading || state.comparisonSlots.length >= MAX_COMPARISONS;
+    dom.comparisonSummary.textContent = comparisonSummaryText();
+  }
+
+  function addComparisonSlot() {
+    if (state.comparisonSlots.length >= MAX_COMPARISONS) return;
+    const used = new Set(state.comparisonSlots.map(slot => slot.preset));
+    const preset = COMPARISON_PRESETS.find(item => item.id !== "specific-date" && !used.has(item.id))?.id || "last-week";
+    state.comparisonSlots.push({ preset, date: "" });
+    state.comparisonExplicit = true;
+    applyComparisonChange(`${comparisonSpecLabel(preset)} comparison added.`);
+  }
+
+  function applyComparisonChange(message) {
+    saveSelection();
+    renderComparisonControls();
+    dom.comparisonStatus.textContent = message;
+    if (state.selectedDate && comparisonSpecs().length === state.comparisonSlots.length) loadRatings(state.selectedDate);
+  }
+
+  function comparisonSpecs() {
+    return state.comparisonSlots.map(slotToSpec).filter(Boolean).slice(0, MAX_COMPARISONS);
+  }
+
+  function slotToSpec(slot) {
+    return slot?.preset === "specific-date" ? (isIsoDate(slot.date) ? `date:${slot.date}` : null) : normalizeComparisonSpec(slot?.preset);
+  }
+
+  function specToSlot(spec) {
+    return parseComparisonSpec(spec) || { preset: "last-week", date: "" };
+  }
+
+  function syncComparisonSlots(descriptors) {
+    const specs = descriptors.map(descriptor => normalizeComparisonSpec(descriptor.spec)).filter(Boolean).slice(0, MAX_COMPARISONS);
+    if (specs.length) state.comparisonSlots = specs.map(specToSlot);
+    renderComparisonControls();
+  }
+
+  function comparisonSummaryText() {
+    const descriptors = state.data?.comparisonDescriptors || [];
+    const descriptorSpecs = descriptors.map(descriptor => normalizeComparisonSpec(descriptor.spec)).filter(Boolean);
+    const requestedSpecs = comparisonSpecs();
+    const descriptorsAreCurrent = !state.comparisonExplicit
+      || (descriptorSpecs.length === requestedSpecs.length && descriptorSpecs.every((spec, index) => spec === requestedSpecs[index]));
+    if (descriptorsAreCurrent && descriptors.length) {
+      return descriptors.map(descriptor => `${descriptor.label}${descriptor.available === false ? " unavailable" : ""}`).join(", ");
+    }
+    return state.comparisonSlots.map(slot => slot.preset === "specific-date"
+      ? (isIsoDate(slot.date) ? formatShortDate(slot.date) : "Choose a date")
+      : comparisonSpecLabel(slot.preset)).join(", ");
+  }
+
+  function normalizeComparisonSpecList(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(item => normalizeComparisonSpec(typeof item === "string" ? item : item?.spec)).filter(Boolean).slice(0, MAX_COMPARISONS);
+  }
+
+  function normalizeComparisonSpec(value) {
+    const spec = safeString(value).toLowerCase();
+    if (["previous-day", "last-week", "two-weeks-ago", "last-month", "last-year"].includes(spec)) return spec;
+    if (spec.startsWith("date:") && isIsoDate(spec.slice(5))) return `date:${spec.slice(5)}`;
+    return null;
+  }
+
+  function parseComparisonSpec(value) {
+    const spec = normalizeComparisonSpec(value);
+    if (!spec) return null;
+    return spec.startsWith("date:") ? { preset: "specific-date", date: spec.slice(5) } : { preset: spec, date: "" };
+  }
+
+  function comparisonSpecLabel(value) {
+    const parsed = parseComparisonSpec(value);
+    if (!parsed) return "";
+    if (parsed.preset === "specific-date") return formatShortDate(parsed.date);
+    return COMPARISON_PRESETS.find(preset => preset.id === parsed.preset)?.label || parsed.preset;
+  }
+
   function findOption(options, id) {
     const key = safeString(id).toLowerCase();
     return key ? options.find(option => option.id.toLowerCase() === key) || null : null;
@@ -484,23 +653,45 @@
     const comparisons = raw?.comparisonDates || raw?.dates || {};
     const shows = Array.isArray(raw?.shows) ? raw.shows : (Array.isArray(raw?.programs) ? raw.programs : []);
     const inferredDates = inferComparisonDates(shows);
+    const comparisonDescriptors = normalizeComparisonDescriptors(raw?.comparisonDescriptors, comparisons, inferredDates);
     return {
       selectedDate: normalizeIsoDate(raw?.selectedDate || raw?.date) || requestedDate,
-      comparisonDates: {
-        selected: normalizeIsoDate(raw?.selectedDate || raw?.date) || requestedDate,
-        previousWeek: normalizeIsoDate(comparisons.previousWeek || comparisons.priorWeek || comparisons.d7 || inferredDates.previousWeek),
-        twoWeeksAgo: normalizeIsoDate(comparisons.twoWeeksAgo || comparisons.twoWeeksPrior || comparisons.d14 || inferredDates.twoWeeksAgo),
-        previousYear: normalizeIsoDate(comparisons.previousYear || comparisons.priorYear || comparisons.d364 || inferredDates.previousYear)
-      },
       generatedAtUtc: raw?.generatedAtUtc || raw?.generatedAt || raw?.sourceLastModifiedUtc || null,
       isStale: Boolean(raw?.isStale),
       displayTitle: safeString(raw?.displayTitle || raw?.siteTitle),
       version: safeString(raw?.version || raw?.appVersion || raw?.applicationVersion || raw?.serverVersion || raw?.informationalVersion),
-      shows: shows.map(normalizeShow).filter(show => show.name)
+      comparisonDescriptors,
+      shows: shows.map((show, index) => normalizeShow(show, index, comparisonDescriptors)).filter(show => show.name)
     };
   }
 
-  function normalizeShow(show, index) {
+  function normalizeComparisonDescriptors(rawDescriptors, comparisons, inferredDates) {
+    if (Array.isArray(rawDescriptors)) {
+      const seen = new Set();
+      return rawDescriptors.slice(0, MAX_COMPARISONS).map((descriptor, index) => {
+        const spec = normalizeComparisonSpec(descriptor?.spec || descriptor?.preset);
+        let id = safeString(descriptor?.id || descriptor?.slotId || descriptor?.comparisonId || spec) || `comparison-${index + 1}`;
+        while (seen.has(id)) id = `${id}-${index + 1}`;
+        seen.add(id);
+        return {
+          id,
+          label: safeString(descriptor?.label || descriptor?.displayName) || comparisonSpecLabel(spec) || `Comparison ${index + 1}`,
+          targetDate: normalizeIsoDate(descriptor?.targetDate || descriptor?.date),
+          spec,
+          available: descriptor?.available !== false && descriptor?.isAvailable !== false,
+          missingReason: safeString(descriptor?.missingReason || descriptor?.message)
+        };
+      });
+    }
+
+    return [
+      { id: "previousWeek", label: "Prior week", targetDate: normalizeIsoDate(comparisons.previousWeek || comparisons.priorWeek || comparisons.d7 || inferredDates.previousWeek), spec: "last-week" },
+      { id: "twoWeeksAgo", label: "Two weeks prior", targetDate: normalizeIsoDate(comparisons.twoWeeksAgo || comparisons.twoWeeksPrior || comparisons.d14 || inferredDates.twoWeeksAgo), spec: "two-weeks-ago" },
+      { id: "previousYear", label: "Prior year", targetDate: normalizeIsoDate(comparisons.previousYear || comparisons.priorYear || comparisons.d364 || inferredDates.previousYear), spec: "last-year" }
+    ].map(descriptor => ({ ...descriptor, available: true, missingReason: descriptor.targetDate ? "" : "Comparison date unavailable" }));
+  }
+
+  function normalizeShow(show, index, comparisonDescriptors) {
     const rawSegments = Array.isArray(show?.segments) ? show.segments : (Array.isArray(show?.quarterHours) ? show.quarterHours : []);
     const showState = safeString(show?.state).replace(/[^a-z]/gi, "").toLowerCase();
     const numericState = typeof show?.state === "number" ? show.state : null;
@@ -515,11 +706,11 @@
       isPreempted: Boolean(show?.isPreempted || show?.preempted || showState === "missingorpreempted" || numericState === 1),
       isInvalidConfiguration: Boolean(showState === "invalidconfiguration" || numericState === 2),
       preemptionNote: safeString(show?.preemptionNote || show?.statusNote || show?.stateMessage),
-      segments: rawSegments.map(normalizeSegment)
+      segments: rawSegments.map((segment, segmentIndex) => normalizeSegment(segment, segmentIndex, comparisonDescriptors))
     };
   }
 
-  function normalizeSegment(segment, index) {
+  function normalizeSegment(segment, index, comparisonDescriptors) {
     const current = segment?.current || {};
     const values = segment?.values || {};
     const normalized = {
@@ -527,37 +718,44 @@
       time: safeString(segment?.time || segment?.actualTime || current?.timeLabel),
       rawTitle: safeString(segment?.rawTitle || current?.programName),
       isShifted: Boolean(segment?.isShifted || segment?.shifted),
-      isPreempted: Boolean(segment?.isPreempted || segment?.preempted)
+      isPreempted: Boolean(segment?.isPreempted || segment?.preempted),
+      selected: normalizeValue(firstDefined(segment?.selected, segment?.value, values?.selected, values?.value, segment?.current, current?.p18PlusImpressions)),
+      comparisonValues: Object.create(null)
     };
-    for (const series of SERIES) {
-      const aliases = series.key === "previousWeek" ? ["previousWeek", "priorWeek", "d7"]
-        : series.key === "twoWeeksAgo" ? ["twoWeeksAgo", "twoWeeksPrior", "d14"]
-          : series.key === "previousYear" ? ["previousYear", "priorYear", "d364"]
-            : ["selected", "value", "current"];
-      let candidate;
-      for (const key of aliases) {
-        if (segment?.[key] !== undefined) { candidate = segment[key]; break; }
-        if (values?.[key] !== undefined) { candidate = values[key]; break; }
+    comparisonDescriptors.forEach((descriptor, descriptorIndex) => {
+      const aliases = comparisonAliases(descriptor.spec);
+      let candidate = firstDefined(segment?.[descriptor.id], values?.[descriptor.id]);
+      for (const key of aliases) candidate = firstDefined(candidate, segment?.[key], values?.[key]);
+      if (candidate === undefined) {
+        const period = findDescriptorComparison(segment?.comparisons, descriptor, descriptorIndex);
+        if (period) candidate = comparisonCandidate(period);
       }
-      if (candidate === undefined && series.key === "selected") {
-        candidate = current?.p18PlusImpressions;
-      }
-      if (candidate === undefined && series.key !== "selected") {
-        const period = findPeriodComparison(segment?.comparisons, series.key);
-        if (period) {
-          candidate = {
-            value: firstPresent(period, ["value", "metricValue", "impressions"]),
-            delta: period.delta?.absolute,
-            percentDelta: period.delta?.percentage,
-            actualTime: period.actualTimeLabel,
-            rawTitle: period.actualProgramName,
-            missingReason: period.missingReason
-          };
-        }
-      }
-      normalized[series.key] = normalizeValue(candidate);
-    }
+      normalized.comparisonValues[descriptor.id] = descriptor.available
+        ? normalizeValue(candidate)
+        : { value: null, missingReason: descriptor.missingReason || "Comparison report unavailable" };
+    });
     return normalized;
+  }
+
+  function comparisonAliases(spec) {
+    const preset = parseComparisonSpec(spec)?.preset;
+    if (preset === "previous-day") return ["previousDay", "previous-day", "priorDay", "prior-day", "d1"];
+    if (preset === "last-week") return ["previousWeek", "previous-week", "priorWeek", "prior-week", "d7"];
+    if (preset === "two-weeks-ago") return ["twoWeeksAgo", "twoWeeksPrior", "two-weeks-prior", "d14"];
+    if (preset === "last-month") return ["previousMonth", "previous-month", "lastMonth", "d28"];
+    if (preset === "last-year") return ["previousYear", "previous-year", "priorYear", "prior-year", "d364"];
+    return [];
+  }
+
+  function comparisonCandidate(period) {
+    return {
+      value: firstPresent(period, ["value", "metricValue", "impressions"]),
+      delta: period.delta?.absolute ?? period.delta,
+      percentDelta: period.delta?.percentage ?? period.percentDelta,
+      actualTime: period.actualTimeLabel || period.actualTime,
+      rawTitle: period.actualProgramName || period.rawTitle,
+      missingReason: period.missingReason
+    };
   }
 
   function normalizeValue(raw) {
@@ -581,21 +779,24 @@
     for (const show of shows) {
       const segments = show?.segments || show?.quarterHours || [];
       for (const segment of segments) {
-        for (const series of SERIES.slice(1)) {
-          const comparison = findPeriodComparison(segment?.comparisons, series.key);
-          if (!result[series.key] && comparison?.targetDate) result[series.key] = comparison.targetDate;
+        for (const [key, spec] of [["previousWeek", "last-week"], ["twoWeeksAgo", "two-weeks-ago"], ["previousYear", "last-year"]]) {
+          const comparison = findDescriptorComparison(segment?.comparisons, { id: key, spec }, -1);
+          if (!result[key] && comparison?.targetDate) result[key] = comparison.targetDate;
         }
       }
     }
     return result;
   }
 
-  function findPeriodComparison(comparisons, seriesKey) {
+  function findDescriptorComparison(comparisons, descriptor, fallbackIndex) {
     if (!Array.isArray(comparisons)) return null;
-    const expected = seriesKey === "previousWeek" ? ["last-week", "previous-week", "d7"]
-      : seriesKey === "twoWeeksAgo" ? ["two-weeks-ago", "two-weeks-prior", "d14"]
-        : ["last-year", "previous-year", "d364"];
-    return comparisons.find(item => expected.includes(safeString(item?.period?.id || item?.periodId || item?.id).toLowerCase())) || null;
+    const descriptorIds = [descriptor.id, descriptor.spec].map(value => safeString(value).toLowerCase()).filter(Boolean);
+    const matched = comparisons.find(item => {
+      const ids = [item?.comparisonDescriptorId, item?.descriptorId, item?.slotId, item?.id, item?.period?.id, item?.periodId, item?.target?.id, item?.target?.spec, item?.spec]
+        .map(value => safeString(value).toLowerCase()).filter(Boolean);
+      return ids.some(id => descriptorIds.includes(id)) || comparisonAliases(descriptor.spec).map(value => value.toLowerCase()).some(alias => ids.includes(alias));
+    });
+    return matched || (fallbackIndex >= 0 ? comparisons[fallbackIndex] : null) || null;
   }
 
   function renderRatings() {
@@ -609,6 +810,7 @@
     applyDisplayTitle(state.data.displayTitle || state.status?.displayTitle);
     renderVersion(state.data.version || state.status?.version || "");
     renderSelectors();
+    renderComparisonControls();
 
     renderWarnings();
     if (state.data.shows.length === 0) {
@@ -656,13 +858,30 @@
     return article;
   }
 
+  function currentSeries() {
+    const comparisons = (state.data?.comparisonDescriptors || []).slice(0, MAX_COMPARISONS).map((descriptor, index) => ({
+      key: descriptor.id,
+      label: descriptor.label,
+      date: descriptor.targetDate,
+      available: descriptor.available,
+      seriesClass: `series-comparison-${index + 1}`,
+      className: `chart-line--secondary${index > 0 ? " chart-line--dashed" : ""}`,
+      dashed: index > 0
+    }));
+    return [{ ...SELECTED_SERIES, date: state.data?.selectedDate, available: true }, ...comparisons];
+  }
+
+  function seriesValue(segment, series) {
+    return series.key === "selected" ? segment.selected : segment.comparisonValues?.[series.key];
+  }
+
   function createLegend() {
     const legend = element("div", "legend");
-    for (const series of SERIES) {
+    for (const series of currentSeries()) {
       const item = element("span", `legend-item ${series.seriesClass}${series.dashed ? " legend-item--dashed" : ""}`);
       item.append(element("span", "legend-swatch"));
       item.append(element("span", "", series.label));
-      item.append(element("span", "legend-date", formatShortDate(state.data.comparisonDates[series.key])));
+      item.append(element("span", "legend-date", series.available === false ? "Unavailable" : formatShortDate(series.date)));
       legend.append(item);
     }
     return legend;
@@ -670,7 +889,8 @@
 
   function createChart(show) {
     const wrap = element("div", "chart-wrap");
-    const allValues = show.segments.flatMap(segment => SERIES.map(series => segment[series.key]?.value)).filter(Number.isFinite);
+    const seriesList = currentSeries();
+    const allValues = show.segments.flatMap(segment => seriesList.map(series => seriesValue(segment, series)?.value)).filter(Number.isFinite);
     if (!show.segments.length || !allValues.length) {
       wrap.append(element("div", "chart-empty", `No ${metricContextLabel(selectedMetric()).toLowerCase()} values are available for this show.`));
       return wrap;
@@ -686,7 +906,7 @@
     const x = index => margin.left + (show.segments.length <= 1 ? plotWidth / 2 : index * plotWidth / (show.segments.length - 1));
     const y = value => margin.top + plotHeight - (value / niceMax) * plotHeight;
     const svg = svgElement("svg", { viewBox: `0 0 ${width} ${height}`, class: "ratings-chart", role: "img" });
-    svg.setAttribute("aria-label", `${show.name}, ${selectedDemographic()?.label || "selected audience"} ${metricContextLabel(selectedMetric())} by quarter hour for ${SERIES.map(s => `${s.label} ${formatShortDate(state.data.comparisonDates[s.key])}`).join(", ")}`);
+    svg.setAttribute("aria-label", `${show.name}, ${selectedDemographic()?.label || "selected audience"} ${metricContextLabel(selectedMetric())} by quarter hour for ${seriesList.map(series => `${series.label} ${series.available === false ? "unavailable" : formatShortDate(series.date)}`).join(", ")}`);
 
     for (let tick = 0; tick <= 4; tick++) {
       const value = niceMax * tick / 4;
@@ -705,8 +925,8 @@
       svg.append(label);
     });
 
-    for (const series of [...SERIES].reverse()) {
-      const runs = contiguousRuns(show.segments.map(segment => segment[series.key]?.value));
+    for (const series of [...seriesList].reverse()) {
+      const runs = contiguousRuns(show.segments.map(segment => seriesValue(segment, series)?.value));
       for (const run of runs) {
         const points = run.map(point => `${x(point.index)},${y(point.value)}`).join(" ");
         if (run.length > 1) {
@@ -728,6 +948,7 @@
   }
 
   function createTable(show) {
+    const seriesList = currentSeries();
     const panel = element("section", "table-panel");
     panel.append(element("h3", "", `Exact quarter-hour ${metricContextLabel(selectedMetric()).toLowerCase()}`));
     const scroll = element("div", "table-scroll");
@@ -738,8 +959,10 @@
     const thead = document.createElement("thead");
     const headerRow = document.createElement("tr");
     headerRow.append(tableHeader("Quarter hour"));
-    headerRow.append(tableHeader(`Selected · ${formatShortDate(state.data.comparisonDates.selected)}`));
-    for (const series of SERIES.slice(1)) headerRow.append(tableHeader(`${series.label} · ${formatShortDate(state.data.comparisonDates[series.key])}`));
+    headerRow.append(tableHeader(`Selected · ${formatShortDate(state.data.selectedDate)}`));
+    for (const series of seriesList.slice(1)) {
+      headerRow.append(tableHeader(`${series.label} · ${series.available === false ? "Unavailable" : formatShortDate(series.date)}`));
+    }
     thead.append(headerRow);
     table.append(thead);
 
@@ -752,7 +975,7 @@
       if (segmentNotes.length) labelCell.append(element("span", "stat-change", segmentNotes.join(" · ")));
       row.append(labelCell);
       row.append(valueCell(segment.selected));
-      for (const series of SERIES.slice(1)) row.append(comparisonCell(segment.selected, segment[series.key]));
+      for (const series of seriesList.slice(1)) row.append(comparisonCell(segment.selected, seriesValue(segment, series)));
       tbody.append(row);
     }
     table.append(tbody);
@@ -857,6 +1080,7 @@
       dom.showList.hidden = true;
     }
     renderSelectors();
+    renderComparisonControls();
   }
 
   function showMessage(title, body, retry) {
@@ -958,6 +1182,10 @@
     return undefined;
   }
 
+  function firstDefined(...values) {
+    return values.find(value => value !== undefined);
+  }
+
   function firstArrayProperty(source, keys) {
     if (!source || typeof source !== "object") return null;
     for (const key of keys) {
@@ -1034,6 +1262,11 @@
           if (normalizeToken(key) && safeString(value)) state.metricByDemographic[normalizeToken(key)] = safeString(value);
         }
       }
+      const comparisons = normalizeComparisonSpecList(saved.comparisonSpecs);
+      if (comparisons.length) {
+        state.comparisonSlots = comparisons.map(specToSlot);
+        state.comparisonExplicit = true;
+      }
     } catch {
       // Storage can be unavailable in locked-down browsers; selection remains session-local.
     }
@@ -1044,7 +1277,8 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         demographicId: state.demographicId,
         metricId: state.metricId,
-        metricByDemographic: state.metricByDemographic
+        metricByDemographic: state.metricByDemographic,
+        comparisonSpecs: state.comparisonExplicit ? comparisonSpecs() : undefined
       }));
     } catch {
       // The view continues to work when storage is unavailable or full.

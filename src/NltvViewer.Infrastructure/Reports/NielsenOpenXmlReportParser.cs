@@ -81,7 +81,7 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
         CancellationToken cancellationToken)
     {
         var workbookPart = document.WorkbookPart;
-        var sheets = workbookPart?.Workbook.Sheets?.Elements<Sheet>().ToArray();
+        var sheets = workbookPart?.Workbook?.Sheets?.Elements<Sheet>().ToArray();
         if (workbookPart is null || sheets is null || sheets.Length == 0)
         {
             return ReportParseResult.Failure(
@@ -109,7 +109,7 @@ public sealed partial class NielsenOpenXmlReportParser : IVersionedReportParser
             }
 
             var worksheetName = sheet.Name?.Value ?? "(unnamed)";
-            var rows = worksheetPart.Worksheet.GetFirstChild<SheetData>()?
+            var rows = worksheetPart.Worksheet?.GetFirstChild<SheetData>()?
                 .Elements<Row>()
                 .Select(row => ReadRow(row, sharedStrings))
                 .Where(row => row.Cells.Count > 0)
